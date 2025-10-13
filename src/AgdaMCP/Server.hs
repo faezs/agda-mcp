@@ -23,7 +23,7 @@ import Control.Monad (forM, when, void)
 import Control.Monad.IO.Class (liftIO)
 import Control.Concurrent (forkIO, ThreadId)
 import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
-import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar, tryPutMVar)
 import System.FilePath (takeDirectory)
 
 -- MCP Server library
@@ -39,7 +39,10 @@ import Agda.Interaction.MakeCase (makeCase)
 import Agda.Interaction.Imports (CheckResult, crInterface, Mode(..), parseSource, typeCheckMain)
 import Agda.Interaction.Options (defaultOptions)
 import Agda.Interaction.Output (OutputConstraint)
-import Agda.Interaction.Response (Response)
+import Agda.Interaction.Response
+import Agda.Interaction.Response.Base
+import Agda.Interaction.JSON (EncodeTCM(..), encodeTCM)
+import Agda.Interaction.JSONTop () -- Import JSON instances
 
 import Agda.Syntax.Common
 import Agda.Syntax.Common.Pretty (render, pretty, prettyShow)
@@ -87,7 +90,7 @@ instance JSON.FromJSON AgdaResult
 -- | Wrapper for commands with response handling
 data CommandWithResponse = CommandWithResponse
   { cmdIOTCM :: IOTCM
-  , cmdResponseVar :: MVar Response
+  , cmdResponseVar :: MVar JSON.Value  -- Store encoded JSON, not raw Response
   }
 
 -- Server state - tracks current file, check result, and persistent REPL
@@ -96,7 +99,7 @@ data ServerState = ServerState
   , checkResult :: Maybe CheckResult
   , commandChan :: Chan CommandWithResponse  -- Channel to send commands to REPL
   , replThreadId :: Maybe ThreadId           -- Background REPL thread
-  , currentResponseVar :: IORef (Maybe (MVar Response))  -- Current response MVar
+  , currentResponseVar :: IORef (Maybe (MVar JSON.Value))  -- Current response MVar for encoded JSON
   }
 
 -- ============================================================================
@@ -104,7 +107,7 @@ data ServerState = ServerState
 -- ============================================================================
 
 -- | Read IOTCM commands from channel, store response MVar, and wrap in Command type
-readCommandFromChan :: IORef (Maybe (MVar Response)) -> Chan CommandWithResponse -> IO Command
+readCommandFromChan :: IORef (Maybe (MVar JSON.Value)) -> Chan CommandWithResponse -> IO Command
 readCommandFromChan responseVarRef chan = do
   CommandWithResponse iotcm responseVar <- readChan chan
   -- Store the response MVar so callback can use it
@@ -112,15 +115,44 @@ readCommandFromChan responseVarRef chan = do
   return $ Command iotcm
 
 -- | Callback for capturing Agda responses and routing to waiting handlers
-mcpCallback :: IORef (Maybe (MVar Response)) -> Response -> TCM ()
-mcpCallback responseVarRef resp = liftIO $ do
-  maybeVar <- readIORef responseVarRef
-  case maybeVar of
-    Just responseVar -> do
-      putMVar responseVar resp
-      putStrLn "Agda response routed to handler"
-    Nothing ->
-      putStrLn "Warning: Received response with no waiting handler"
+-- Pattern match on specific response types we care about
+-- Encode responses in the TCM context before routing
+mcpCallback :: IORef (Maybe (MVar JSON.Value)) -> Response -> TCM ()
+mcpCallback responseVarRef resp = do
+  let isContentResponse = case resp of
+        Resp_InteractionPoints _ -> True
+        Resp_DisplayInfo _ -> True
+        Resp_GiveAction _ _ -> True
+        Resp_MakeCase _ _ _ -> True
+        Resp_SolveAll _ -> True
+        Resp_JumpToError _ _ -> True
+        Resp_Status _ -> False
+        Resp_HighlightingInfo _ _ _ _ -> False
+        Resp_RunningInfo _ _ -> False
+        Resp_ClearRunningInfo -> False
+        Resp_ClearHighlighting _ -> False
+        Resp_DoneAborting -> False
+        Resp_DoneExiting -> False
+        Resp_Mimer _ _ -> False
+
+  if isContentResponse
+    then do
+      -- Encode response in the current TCM context
+      jsonValue <- encodeTCM resp
+      maybeVar <- liftIO $ readIORef responseVarRef
+      case maybeVar of
+        Just responseVar -> liftIO $ do
+          success <- tryPutMVar responseVar jsonValue
+          if success
+            then do
+              putStrLn "Agda response encoded and routed to handler"
+              writeIORef responseVarRef Nothing
+            else
+              putStrLn "Agda response ignored (handler already has response)"
+        Nothing -> liftIO $
+          putStrLn "Warning: Received response with no waiting handler"
+    else liftIO $
+      putStrLn "Agda non-content response (skipped)"
 
 -- | Convert MCP tool to Agda IOTCM command
 -- Takes the current file path (empty string if no file loaded)
@@ -462,13 +494,21 @@ handleAgdaTool stateRef tool = do
   writeChan (commandChan state) cmd
   putStrLn $ "Sent command to REPL: " ++ show tool
 
-  -- Wait for response from REPL
-  response <- takeMVar responseVar
-  putStrLn "Received response from REPL"
+  -- Wait for encoded JSON response from REPL
+  jsonValue <- takeMVar responseVar
+  putStrLn "Received encoded response from REPL"
 
-  -- Convert Response to MCP Content
-  -- TODO: Parse response properly and extract relevant information
-  pure $ MCP.Server.ContentText $ T.pack $ "Response received from Agda REPL"
+  -- If this was a successful load, update the current file in state
+  case tool of
+    AgdaMCP.Types.AgdaLoad{file} -> do
+      absPath <- absolute (T.unpack file)
+      modifyIORef stateRef (\s -> s { currentFile = Just absPath })
+      putStrLn $ "Updated current file to: " ++ T.unpack file
+    _ -> return ()
+
+  -- Convert JSON to Text for MCP response
+  let responseText = TE.decodeUtf8 $ LBS.toStrict $ JSON.encode jsonValue
+  pure $ MCP.Server.ContentText responseText
 
 -- MCP Resource Handler - exposes Agda file information as resources
 -- Resources extract parameters from the URI path
