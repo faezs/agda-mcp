@@ -1,0 +1,116 @@
+diff --git a/src/MCP/Server/Transport/Http.hs b/src/MCP/Server/Transport/Http.hs
+index accf362..aea5d2f 100644
+--- a/src/MCP/Server/Transport/Http.hs
++++ b/src/MCP/Server/Transport/Http.hs
+@@ -70,62 +70,58 @@ mcpApplication config serverInfo handlers req respond = do
+ -- | Handle MCP requests according to Streamable HTTP specification
+ handleMcpRequest :: HttpConfig -> McpServerInfo -> McpServerHandlers IO -> Wai.Request -> (Wai.Response -> IO Wai.ResponseReceived) -> IO Wai.ResponseReceived
+ handleMcpRequest config serverInfo handlers req respond = do
+-  -- Check for mandatory MCP-Protocol-Version header (2025-06-18 requirement)
++  -- Check for optional MCP-Protocol-Version header (2025-06-18 spec)
++  -- Made optional for backward compatibility with clients that only send version in initialize message
+   case lookup "MCP-Protocol-Version" (Wai.requestHeaders req) of
+-    Nothing -> do
+-      logVerbose config "Request rejected: Missing MCP-Protocol-Version header"
+-      respond $ Wai.responseLBS
+-        status400
+-        [("Content-Type", "application/json")]
+-        (encode $ object ["error" .= ("Missing required MCP-Protocol-Version header" :: Text)])
+-    Just headerValue -> 
+-      if TE.decodeUtf8 headerValue /= "2025-06-18" then do
+-        logVerbose config $ "Request rejected: Invalid protocol version: " ++ show headerValue
+-        respond $ Wai.responseLBS
+-          status400
+-          [("Content-Type", "application/json")]
+-          (encode $ object ["error" .= ("Unsupported protocol version. Server only supports 2025-06-18" :: Text)])
++    Nothing ->
++      logVerbose config "Warning: MCP-Protocol-Version header missing (will check protocol version in initialize message)"
++    Just headerValue ->
++      if TE.decodeUtf8 headerValue /= "2025-06-18" then
++        logVerbose config $ "Warning: Unsupported protocol version in header: " ++ show headerValue
+       else
+-        case Wai.requestMethod req of
+-          -- GET requests for endpoint discovery
+-          "GET" -> do
+-            let discoveryResponse = object
+-                  [ "name" .= serverName serverInfo
+-                  , "version" .= serverVersion serverInfo
+-                  , "description" .= serverInstructions serverInfo
+-                  , "protocolVersion" .= ("2025-06-18" :: Text)
+-                  , "capabilities" .= object
+-                      [ "tools" .= object []
+-                      , "prompts" .= object []
+-                      , "resources" .= object []
+-                      ]
+-                  ]
+-            logVerbose config $ "Sending server discovery response: " ++ show discoveryResponse
+-            respond $ Wai.responseLBS
+-              status200
+-              [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")]
+-              (encode discoveryResponse)
+-
+-          -- POST requests for JSON-RPC messages
+-          "POST" -> do
+-            -- Read request body
+-            body <- Wai.strictRequestBody req
+-            logVerbose config $ "Received POST body (" ++ show (BSL.length body) ++ " bytes): " ++ take 200 (show body)
+-            handleJsonRpcRequest config serverInfo handlers body respond
+-
+-          -- OPTIONS for CORS preflight
+-          "OPTIONS" -> respond $ Wai.responseLBS
+-            status200
+-            [ ("Access-Control-Allow-Origin", "*")
+-            , ("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+-            , ("Access-Control-Allow-Headers", "Content-Type, MCP-Protocol-Version")
++        logVerbose config "MCP-Protocol-Version header present: 2025-06-18"
++
++  -- Process request regardless of header presence
++  case Wai.requestMethod req of
++    -- GET requests for endpoint discovery
++    "GET" -> do
++      let discoveryResponse = object
++            [ "name" .= serverName serverInfo
++            , "version" .= serverVersion serverInfo
++            , "description" .= serverInstructions serverInfo
++            , "protocolVersion" .= ("2025-06-18" :: Text)
++            , "capabilities" .= object
++                [ "tools" .= object []
++                , "prompts" .= object []
++                , "resources" .= object []
++                ]
+             ]
+-            ""
+-
+-          -- Unsupported methods
+-          _ -> respond $ Wai.responseLBS
+-            status405
+-            [("Content-Type", "text/plain"), ("Allow", "GET, POST, OPTIONS")]
++      logVerbose config $ "Sending server discovery response: " ++ show discoveryResponse
++      respond $ Wai.responseLBS
++        status200
++        [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")]
++        (encode discoveryResponse)
++
++    -- POST requests for JSON-RPC messages
++    "POST" -> do
++      -- Read request body
++      body <- Wai.strictRequestBody req
++      logVerbose config $ "Received POST body (" ++ show (BSL.length body) ++ " bytes): " ++ take 200 (show body)
++      handleJsonRpcRequest config serverInfo handlers body respond
++
++    -- OPTIONS for CORS preflight
++    "OPTIONS" -> respond $ Wai.responseLBS
++      status200
++      [ ("Access-Control-Allow-Origin", "*")
++      , ("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
++      , ("Access-Control-Allow-Headers", "Content-Type, MCP-Protocol-Version")
++      ]
++      ""
++
++    -- Unsupported methods
++    _ -> respond $ Wai.responseLBS
++      status405
++      [("Content-Type", "text/plain"), ("Allow", "GET, POST, OPTIONS")]
+             "Method Not Allowed"
+ 
+ -- | Handle JSON-RPC request from HTTP body

@@ -19,12 +19,17 @@ import Data.Text (Text)
 import Data.Maybe (fromMaybe, isNothing)
 import Data.IORef
 import GHC.Generics (Generic)
-import Control.Monad (forM, when)
+import Control.Monad (forM, when, void)
 import Control.Monad.IO.Class (liftIO)
+import Control.Concurrent (forkIO, ThreadId)
+import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
+import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar)
+import System.FilePath (takeDirectory)
 
 -- MCP Server library
 import qualified MCP.Server
 import qualified AgdaMCP.Types
+import qualified AgdaMCP.Repl as Repl
 
 -- Agda imports - using the actual interaction functions
 import Agda.Interaction.Base
@@ -32,7 +37,9 @@ import Agda.Interaction.BasicOps as BasicOps
 import Agda.Interaction.InteractionTop (cmd_load')
 import Agda.Interaction.MakeCase (makeCase)
 import Agda.Interaction.Imports (CheckResult, crInterface, Mode(..), parseSource, typeCheckMain)
+import Agda.Interaction.Options (defaultOptions)
 import Agda.Interaction.Output (OutputConstraint)
+import Agda.Interaction.Response (Response)
 
 import Agda.Syntax.Common
 import Agda.Syntax.Common.Pretty (render, pretty, prettyShow)
@@ -41,12 +48,13 @@ import Agda.Syntax.Scope.Base (WhyInScopeData(..))
 import Agda.Syntax.Abstract (Expr)
 
 import Agda.TypeChecking.Monad
-import Agda.TypeChecking.Monad.Base (iInsideScope, SourceFile(..) )
+import Agda.TypeChecking.Monad.Base (iInsideScope, SourceFile(..), genericError)
 import Agda.TypeChecking.Monad.MetaVars (getInteractionPoints, getInteractionRange, withInteractionId)
+import Agda.TypeChecking.Monad.Options (setCommandLineOptions')
 import Agda.TypeChecking.Pretty (prettyTCM, prettyA)
 
 import Agda.Utils.FileName (absolute, AbsolutePath, filePath)
-import Agda.Utils.FileId (FileId(..))
+import Agda.Utils.FileId (FileId(..), idFromFile)
 
 -- Data structures for MCP communication
 data AgdaGoal = AgdaGoal
@@ -76,17 +84,87 @@ data AgdaResult = AgdaResult
 instance JSON.ToJSON AgdaResult
 instance JSON.FromJSON AgdaResult
 
--- Server state - just track the current file and its check result
+-- | Wrapper for commands with response handling
+data CommandWithResponse = CommandWithResponse
+  { cmdIOTCM :: IOTCM
+  , cmdResponseVar :: MVar Response
+  }
+
+-- Server state - tracks current file, check result, and persistent REPL
 data ServerState = ServerState
   { currentFile :: Maybe AbsolutePath
   , checkResult :: Maybe CheckResult
+  , commandChan :: Chan CommandWithResponse  -- Channel to send commands to REPL
+  , replThreadId :: Maybe ThreadId           -- Background REPL thread
+  , currentResponseVar :: IORef (Maybe (MVar Response))  -- Current response MVar
   }
 
--- MCP Server entry point
+-- ============================================================================
+-- REPL Integration - Persistent Session Management
+-- ============================================================================
+
+-- | Read IOTCM commands from channel, store response MVar, and wrap in Command type
+readCommandFromChan :: IORef (Maybe (MVar Response)) -> Chan CommandWithResponse -> IO Command
+readCommandFromChan responseVarRef chan = do
+  CommandWithResponse iotcm responseVar <- readChan chan
+  -- Store the response MVar so callback can use it
+  writeIORef responseVarRef (Just responseVar)
+  return $ Command iotcm
+
+-- | Callback for capturing Agda responses and routing to waiting handlers
+mcpCallback :: IORef (Maybe (MVar Response)) -> Response -> TCM ()
+mcpCallback responseVarRef resp = liftIO $ do
+  maybeVar <- readIORef responseVarRef
+  case maybeVar of
+    Just responseVar -> do
+      putMVar responseVar resp
+      putStrLn "Agda response routed to handler"
+    Nothing ->
+      putStrLn "Warning: Received response with no waiting handler"
+
+-- | Convert MCP tool to Agda IOTCM command
+-- Takes the current file path (empty string if no file loaded)
+toolToIOTCM :: String -> AgdaMCP.Types.AgdaTool -> IOTCM
+toolToIOTCM currentFilePath tool =
+  -- IOTCM type is: Maybe TopLevelModuleName -> IOTCM' Range
+  -- So we need to return a function that ignores the module name parameter
+  \_ -> case tool of
+    AgdaMCP.Types.AgdaLoad{file} ->
+      -- Load uses the specified file path
+      IOTCM (T.unpack file) None Direct (Cmd_load (T.unpack file) [])
+    AgdaMCP.Types.AgdaGetGoals ->
+      -- Goals operate on currently loaded file
+      IOTCM currentFilePath None Direct (Cmd_metas Simplified)
+    AgdaMCP.Types.AgdaGetGoalType{goalId} ->
+      -- Goal operations use current file, noRange is acceptable since REPL tracks interaction points
+      IOTCM currentFilePath None Direct (Cmd_goal_type Simplified (InteractionId goalId) noRange "")
+    AgdaMCP.Types.AgdaGetContext{goalId} ->
+      IOTCM currentFilePath None Direct (Cmd_context Simplified (InteractionId goalId) noRange "")
+    AgdaMCP.Types.AgdaGive{goalId, expression} ->
+      IOTCM currentFilePath None Direct (Cmd_give WithoutForce (InteractionId goalId) noRange (T.unpack expression))
+    AgdaMCP.Types.AgdaRefine{goalId, expression} ->
+      IOTCM currentFilePath None Direct (Cmd_refine (InteractionId goalId) noRange (T.unpack expression))
+    AgdaMCP.Types.AgdaCaseSplit{goalId, variable} ->
+      IOTCM currentFilePath None Direct (Cmd_make_case (InteractionId goalId) noRange (T.unpack variable))
+    AgdaMCP.Types.AgdaCompute{goalId, expression} ->
+      IOTCM currentFilePath None Direct (Cmd_compute_toplevel DefaultCompute (T.unpack expression))
+    AgdaMCP.Types.AgdaInferType{goalId, expression} ->
+      IOTCM currentFilePath None Direct (Cmd_infer_toplevel Simplified (T.unpack expression))
+    AgdaMCP.Types.AgdaIntro{goalId} ->
+      IOTCM currentFilePath None Direct (Cmd_intro False (InteractionId goalId) noRange "")
+    AgdaMCP.Types.AgdaWhyInScope{name} ->
+      IOTCM currentFilePath None Direct (Cmd_why_in_scope_toplevel (T.unpack name))
+
+-- ============================================================================
+-- STDIN-based Server (for testing/development)
+-- ============================================================================
+
+-- | Alternative STDIN-based server entry point
+-- Useful for testing Agda commands without HTTP overhead
 runAgdaMCPServer :: IO ()
 runAgdaMCPServer = do
   putStrLn "Agda MCP Server started. Send JSON commands to stdin."
-  stateRef <- newIORef (ServerState Nothing Nothing)
+  stateRef <- initServerState  -- Use same initialization as HTTP server
   serverLoop stateRef
 
 -- Server loop
@@ -175,148 +253,142 @@ processMCPCommand stateRef = \case
 
 -- Command implementations
 
+-- Helper function to ensure a file is loaded and scope is set
+-- Restores scope from stored CheckResult if available
+ensureFileLoaded :: IORef ServerState -> TCM ()
+ensureFileLoaded stateRef = do
+  state <- liftIO $ readIORef stateRef
+  case checkResult state of
+    Just checked ->
+      -- Restore scope from cached CheckResult
+      setScope $ iInsideScope $ crInterface checked
+    Nothing ->
+      -- No file loaded yet
+      genericError "No file loaded. Use agda_load first."
+
 mcpLoadFile :: IORef ServerState -> FilePath -> TCM AgdaResult
 mcpLoadFile stateRef file = do
   absPath <- liftIO $ absolute file
-  -- Use a simple FileId (Word32)- just use 0 for now, Agda will handle it
-  let sourceFile = SourceFile (FileId 0)
+  -- Get the directory containing the file for options initialization
+  fileDir <- liftIO $ absolute $ takeDirectory file
+  -- Initialize options with the file's directory as root
+  setCommandLineOptions' fileDir defaultOptions
+  -- Properly register the file and get its FileId
+  fileId <- idFromFile absPath
+  let sourceFile = SourceFile fileId
   source <- parseSource sourceFile
   checked <- typeCheckMain TypeCheck source
   setScope $ iInsideScope $ crInterface checked
-  liftIO $ writeIORef stateRef (ServerState (Just absPath) (Just checked))
+  -- Update state, preserving channel and thread ID
+  state <- liftIO $ readIORef stateRef
+  liftIO $ writeIORef stateRef (state { currentFile = Just absPath, checkResult = Just checked })
   pure $ AgdaResult True "File loaded successfully" Nothing
 
 mcpGetGoals :: IORef ServerState -> TCM AgdaResult
 mcpGetGoals stateRef = do
-  state <- liftIO $ readIORef stateRef
-  case currentFile state of
-    Nothing -> pure $ AgdaResult False "No file loaded" Nothing
-    Just _ -> do
-      interactionIds <- getInteractionPoints
-      goals <- forM interactionIds $ \iid -> do
-        range <- getInteractionRange iid
-        constraint <- BasicOps.typeOfMeta AsIs iid
-        goalTypeText <- renderConstraintType constraint
-        return $ AgdaGoal
-          { goalId = fromIntegral ((\(InteractionId n) -> n) iid)
-          , goalType = goalTypeText
-          , goalRange = rangeToTuple range
-          }
-      pure $ AgdaResult True "Success" (Just $ JSON.toJSON goals)
+  ensureFileLoaded stateRef
+  interactionIds <- getInteractionPoints
+  goals <- forM interactionIds $ \iid -> do
+    range <- getInteractionRange iid
+    constraint <- BasicOps.typeOfMeta AsIs iid
+    goalTypeText <- renderConstraintType constraint
+    return $ AgdaGoal
+      { goalId = fromIntegral ((\(InteractionId n) -> n) iid)
+      , goalType = goalTypeText
+      , goalRange = rangeToTuple range
+      }
+  pure $ AgdaResult True "Success" (Just $ JSON.toJSON goals)
 
 mcpGetGoalType :: IORef ServerState -> Int -> TCM AgdaResult
 mcpGetGoalType stateRef goalIdParam = do
-  state <- liftIO $ readIORef stateRef
-  case currentFile state of
-    Nothing -> pure $ AgdaResult False "No file loaded" Nothing
-    Just _ -> do
-      let iid = InteractionId goalIdParam
-      constraint <- withInteractionId iid $ BasicOps.typeOfMeta AsIs iid
-      goalTypeText <- renderConstraintType constraint
-      pure $ AgdaResult True "Success" (Just $ JSON.String goalTypeText)
+  ensureFileLoaded stateRef
+  let iid = InteractionId goalIdParam
+  constraint <- withInteractionId iid $ BasicOps.typeOfMeta AsIs iid
+  goalTypeText <- renderConstraintType constraint
+  pure $ AgdaResult True "Success" (Just $ JSON.String goalTypeText)
 
 mcpGetContext :: IORef ServerState -> Int -> TCM AgdaResult
 mcpGetContext stateRef goalIdParam = do
-  state <- liftIO $ readIORef stateRef
-  case currentFile state of
-    Nothing -> pure $ AgdaResult False "No file loaded" Nothing
-    Just _ -> do
-      let iid = InteractionId goalIdParam
-      constraint <- withInteractionId iid $ BasicOps.typeOfMeta AsIs iid
-      contextEntries <- renderConstraintContext constraint
-      pure $ AgdaResult True "Success" (Just $ JSON.toJSON contextEntries)
+  ensureFileLoaded stateRef
+  let iid = InteractionId goalIdParam
+  constraint <- withInteractionId iid $ BasicOps.typeOfMeta AsIs iid
+  contextEntries <- renderConstraintContext constraint
+  pure $ AgdaResult True "Success" (Just $ JSON.toJSON contextEntries)
 
 mcpGive :: IORef ServerState -> Int -> String -> TCM AgdaResult
 mcpGive stateRef goalIdParam exprStr = do
-  state <- liftIO $ readIORef stateRef
-  case currentFile state of
-    Nothing -> pure $ AgdaResult False "No file loaded" Nothing
-    Just _ -> do
-      let iid = InteractionId goalIdParam
-      expr <- BasicOps.parseExprIn iid noRange exprStr
-      result <- withInteractionId iid $ BasicOps.give WithoutForce iid Nothing expr
-      resultDoc <- prettyTCM result
-      let resultText = render resultDoc
-      pure $ AgdaResult True "Expression given" (Just $ JSON.String $ T.pack resultText)
+  ensureFileLoaded stateRef
+  let iid = InteractionId goalIdParam
+  expr <- BasicOps.parseExprIn iid noRange exprStr
+  result <- withInteractionId iid $ BasicOps.give WithoutForce iid Nothing expr
+  resultDoc <- prettyTCM result
+  let resultText = render resultDoc
+  pure $ AgdaResult True "Expression given" (Just $ JSON.String $ T.pack resultText)
 
 mcpRefine :: IORef ServerState -> Int -> String -> TCM AgdaResult
 mcpRefine stateRef goalIdParam exprStr = do
-  state <- liftIO $ readIORef stateRef
-  case currentFile state of
-    Nothing -> pure $ AgdaResult False "No file loaded" Nothing
-    Just _ -> do
-      let iid = InteractionId goalIdParam
-      expr <- BasicOps.parseExprIn iid noRange exprStr
-      result <- withInteractionId iid $ BasicOps.refine WithoutForce iid Nothing expr
-      resultDoc <- prettyTCM result
-      let resultText = render resultDoc
-      pure $ AgdaResult True "Refinement successful" (Just $ JSON.String $ T.pack resultText)
+  ensureFileLoaded stateRef
+  let iid = InteractionId goalIdParam
+  expr <- BasicOps.parseExprIn iid noRange exprStr
+  result <- withInteractionId iid $ BasicOps.refine WithoutForce iid Nothing expr
+  resultDoc <- prettyTCM result
+  let resultText = render resultDoc
+  pure $ AgdaResult True "Refinement successful" (Just $ JSON.String $ T.pack resultText)
 
 mcpCaseSplit :: IORef ServerState -> Int -> String -> TCM AgdaResult
 mcpCaseSplit stateRef goalIdParam varName = do
-  state <- liftIO $ readIORef stateRef
-  case currentFile state of
-    Nothing -> pure $ AgdaResult False "No file loaded" Nothing
-    Just _ -> do
-      let iid = InteractionId goalIdParam
-      (_, _, clauses) <- withInteractionId iid $ makeCase iid noRange varName
-      -- Convert clauses to pretty text
-      clauseDocs <- mapM prettyA clauses
-      let clauseTexts = map (T.pack . render) clauseDocs
-      pure $ AgdaResult True "Case split successful" (Just $ JSON.toJSON clauseTexts)
+  ensureFileLoaded stateRef
+  let iid = InteractionId goalIdParam
+  (_, _, clauses) <- withInteractionId iid $ makeCase iid noRange varName
+  -- Convert clauses to pretty text
+  clauseDocs <- mapM prettyA clauses
+  let clauseTexts = map (T.pack . render) clauseDocs
+  pure $ AgdaResult True "Case split successful" (Just $ JSON.toJSON clauseTexts)
 
 mcpCompute :: IORef ServerState -> Int -> String -> TCM AgdaResult
 mcpCompute stateRef goalIdParam exprStr = do
-  state <- liftIO $ readIORef stateRef
-  case currentFile state of
-    Nothing -> pure $ AgdaResult False "No file loaded" Nothing
-    Just _ -> do
-      let iid = InteractionId goalIdParam
-      expr <- BasicOps.parseExprIn iid noRange exprStr
-      -- For now, just return the parsed expression as we can't normalize Expr directly
-      -- We would need to convert to internal syntax first
-      doc <- prettyA expr
-      let resultText = render doc
-      pure $ AgdaResult True "Expression parsed" (Just $ JSON.String $ T.pack resultText)
+  ensureFileLoaded stateRef
+  let iid = InteractionId goalIdParam
+  expr <- BasicOps.parseExprIn iid noRange exprStr
+  -- For now, just return the parsed expression as we can't normalize Expr directly
+  -- We would need to convert to internal syntax first
+  doc <- prettyA expr
+  let resultText = render doc
+  pure $ AgdaResult True "Expression parsed" (Just $ JSON.String $ T.pack resultText)
 
 mcpInferType :: IORef ServerState -> Int -> String -> TCM AgdaResult
 mcpInferType stateRef goalIdParam exprStr = do
-  state <- liftIO $ readIORef stateRef
-  case currentFile state of
-    Nothing -> pure $ AgdaResult False "No file loaded" Nothing
-    Just _ -> do
-      let iid = InteractionId goalIdParam
-      expr <- BasicOps.parseExprIn iid noRange exprStr
-      typeExpr <- withInteractionId iid $ BasicOps.typeInMeta iid AsIs expr
-      resultDoc <- prettyTCM typeExpr
-      let resultText = render resultDoc
-      pure $ AgdaResult True "Type inferred" (Just $ JSON.String $ T.pack resultText)
+  ensureFileLoaded stateRef
+  let iid = InteractionId goalIdParam
+  expr <- BasicOps.parseExprIn iid noRange exprStr
+  typeExpr <- withInteractionId iid $ BasicOps.typeInMeta iid AsIs expr
+  resultDoc <- prettyTCM typeExpr
+  let resultText = render resultDoc
+  pure $ AgdaResult True "Type inferred" (Just $ JSON.String $ T.pack resultText)
 
 mcpIntro :: IORef ServerState -> Int -> TCM AgdaResult
 mcpIntro stateRef goalIdParam = do
-  state <- liftIO $ readIORef stateRef
-  case currentFile state of
-    Nothing -> pure $ AgdaResult False "No file loaded" Nothing
-    Just _ -> do
-      let iid = InteractionId goalIdParam
-      intros <- withInteractionId iid $ BasicOps.introTactic False iid
-      pure $ AgdaResult True "Intro suggestions" (Just $ JSON.toJSON $ map T.pack intros)
+  ensureFileLoaded stateRef
+  let iid = InteractionId goalIdParam
+  intros <- withInteractionId iid $ BasicOps.introTactic False iid
+  pure $ AgdaResult True "Intro suggestions" (Just $ JSON.toJSON $ map T.pack intros)
 
 mcpWhyInScope :: IORef ServerState -> String -> TCM AgdaResult
 mcpWhyInScope stateRef name = do
+  ensureFileLoaded stateRef
   state <- liftIO $ readIORef stateRef
-  case currentFile state of
-    Nothing -> pure $ AgdaResult False "No file loaded" Nothing
-    Just absPath -> do
-      whyData <- BasicOps.whyInScope (show absPath) name
-      let WhyInScopeData qname file _ defs mods = whyData
-      let result = JSON.object
-            [ "qualified_name" JSON..= T.pack (show qname)
-            , "file" JSON..= T.pack file
-            , "definitions" JSON..= (map (T.pack . show) defs)
-            , "modules" JSON..= (map (T.pack . show) mods)
-            ]
-      pure $ AgdaResult True "Scope information" (Just result)
+  let absPath = case currentFile state of
+        Just path -> path
+        Nothing -> error "ensureFileLoaded should have caught this"
+  whyData <- BasicOps.whyInScope (show absPath) name
+  let WhyInScopeData qname file _ defs mods = whyData
+  let result = JSON.object
+        [ "qualified_name" JSON..= T.pack (show qname)
+        , "file" JSON..= T.pack file
+        , "definitions" JSON..= (map (T.pack . show) defs)
+        , "modules" JSON..= (map (T.pack . show) mods)
+        ]
+  pure $ AgdaResult True "Scope information" (Just result)
 
 -- Helper functions
 
@@ -345,47 +417,58 @@ renderConstraintContext constraint = do
 -- MCP Library Integration
 -- ============================================================================
 
--- Initialize server state
+-- Initialize server state and start persistent REPL
 initServerState :: IO (IORef ServerState)
-initServerState = newIORef (ServerState Nothing Nothing)
+initServerState = do
+  chan <- newChan
+  responseVarRef <- newIORef Nothing
+  stateRef <- newIORef (ServerState Nothing Nothing chan Nothing responseVarRef)
 
--- MCP Tool Handler - wraps our existing Agda commands
+  -- Start persistent REPL in background thread
+  threadId <- forkIO $ do
+    putStrLn "Starting persistent Agda REPL thread..."
+    result <- runTCMTop $ Repl.mcpRepl
+      (mcpCallback responseVarRef)              -- Response callback with IORef
+      (readCommandFromChan responseVarRef chan) -- Command source with IORef
+      (return ())                               -- No special setup
+    case result of
+      Left err -> putStrLn $ "REPL error: " ++ show err
+      Right _ -> putStrLn "REPL exited normally"
+
+  -- Update state with thread ID
+  modifyIORef stateRef (\s -> s { replThreadId = Just threadId })
+  putStrLn $ "Persistent REPL started with thread ID: " ++ show threadId
+  pure stateRef
+
+-- MCP Tool Handler - routes commands through persistent REPL
 -- This will be called by the mcp-server library when a tool is invoked
 handleAgdaTool :: IORef ServerState -> AgdaMCP.Types.AgdaTool -> IO MCP.Server.Content
 handleAgdaTool stateRef tool = do
-  result <- runTCMTop $ case tool of
-    AgdaMCP.Types.AgdaLoad{file} ->
-      mcpLoadFile stateRef (T.unpack file)
-    AgdaMCP.Types.AgdaGetGoals ->
-      mcpGetGoals stateRef
-    AgdaMCP.Types.AgdaGetGoalType{goalId} ->
-      mcpGetGoalType stateRef goalId
-    AgdaMCP.Types.AgdaGetContext{goalId} ->
-      mcpGetContext stateRef goalId
-    AgdaMCP.Types.AgdaGive{goalId, expression} ->
-      mcpGive stateRef goalId (T.unpack expression)
-    AgdaMCP.Types.AgdaRefine{goalId, expression} ->
-      mcpRefine stateRef goalId (T.unpack expression)
-    AgdaMCP.Types.AgdaCaseSplit{goalId, variable} ->
-      mcpCaseSplit stateRef goalId (T.unpack variable)
-    AgdaMCP.Types.AgdaCompute{goalId, expression} ->
-      mcpCompute stateRef goalId (T.unpack expression)
-    AgdaMCP.Types.AgdaInferType{goalId, expression} ->
-      mcpInferType stateRef goalId (T.unpack expression)
-    AgdaMCP.Types.AgdaIntro{goalId} ->
-      mcpIntro stateRef goalId
-    AgdaMCP.Types.AgdaWhyInScope{name} ->
-      mcpWhyInScope stateRef (T.unpack name)
+  state <- readIORef stateRef
 
-  case result of
-    Left err ->
-      -- Convert TCErr to MCP Content
-      pure $ MCP.Server.ContentText $ "Error: " <> T.pack (show err)
-    Right agdaRes ->
-      -- Convert AgdaResult to MCP Content
-      case agdaResult agdaRes of
-        Nothing -> pure $ MCP.Server.ContentText $ message agdaRes
-        Just val -> pure $ MCP.Server.ContentText $ TE.decodeUtf8 $ LBS.toStrict $ JSON.encode val
+  -- Get current file path for IOTCM commands
+  let currentFilePath = case currentFile state of
+        Just absPath -> filePath absPath
+        Nothing -> ""
+
+  -- Convert tool to IOTCM command
+  let iotcm = toolToIOTCM currentFilePath tool
+
+  -- Create response MVar and command wrapper
+  responseVar <- newEmptyMVar
+  let cmd = CommandWithResponse iotcm responseVar
+
+  -- Send command to persistent REPL
+  writeChan (commandChan state) cmd
+  putStrLn $ "Sent command to REPL: " ++ show tool
+
+  -- Wait for response from REPL
+  response <- takeMVar responseVar
+  putStrLn "Received response from REPL"
+
+  -- Convert Response to MCP Content
+  -- TODO: Parse response properly and extract relevant information
+  pure $ MCP.Server.ContentText $ T.pack $ "Response received from Agda REPL"
 
 -- MCP Resource Handler - exposes Agda file information as resources
 -- Resources extract parameters from the URI path
