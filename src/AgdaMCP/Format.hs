@@ -149,10 +149,12 @@ formatContext infoValue =
 
 formatContextEntry :: JSON.Value -> Text
 formatContextEntry entry =
-  let name = case getField "name" entry of
+  let name = case getField "originalName" entry of
         Just (JSON.String n) -> n
-        _ -> "?"
-      typ = case getField "type" entry of
+        Nothing -> case getField "reifiedName" entry of
+          Just (JSON.String n) -> n
+          _ -> "?"
+      typ = case getField "binding" entry of
         Just (JSON.String t) -> t
         _ -> "?"
   in name <> " : " <> typ
