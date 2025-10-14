@@ -10,6 +10,7 @@ module AgdaMCP.Server
   ) where
 
 import qualified Data.Aeson as JSON
+import qualified AgdaMCP.Format as Format
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
@@ -156,16 +157,17 @@ mcpCallback responseVarRef resp = do
 
 -- | Convert MCP tool to Agda IOTCM command
 -- Takes the current file path (empty string if no file loaded)
+-- Note: The format field is ignored here; it's only used for response formatting
 toolToIOTCM :: String -> AgdaMCP.Types.AgdaTool -> IOTCM
 toolToIOTCM currentFilePath tool =
   -- IOTCM type is: Maybe TopLevelModuleName -> IOTCM' Range
   -- So we need to return a function that ignores the module name parameter
   \_ -> case tool of
     AgdaMCP.Types.AgdaLoad{file} ->
-      -- Load uses the specified file path
+      -- Load uses the specified file path (format field ignored)
       IOTCM (T.unpack file) None Direct (Cmd_load (T.unpack file) [])
-    AgdaMCP.Types.AgdaGetGoals ->
-      -- Goals operate on currently loaded file
+    AgdaMCP.Types.AgdaGetGoals{} ->
+      -- Goals operate on currently loaded file (format field ignored)
       IOTCM currentFilePath None Direct (Cmd_metas Simplified)
     AgdaMCP.Types.AgdaGetGoalType{goalId} ->
       -- Goal operations use current file, noRange is acceptable since REPL tracks interaction points
@@ -506,8 +508,9 @@ handleAgdaTool stateRef tool = do
       putStrLn $ "Updated current file to: " ++ T.unpack file
     _ -> return ()
 
-  -- Convert JSON to Text for MCP response
-  let responseText = TE.decodeUtf8 $ LBS.toStrict $ JSON.encode jsonValue
+  -- Format response based on requested format (default: Concise)
+  let responseFormat = Format.getFormat tool
+  let responseText = Format.formatResponse responseFormat jsonValue
   pure $ MCP.Server.ContentText responseText
 
 -- MCP Resource Handler - exposes Agda file information as resources

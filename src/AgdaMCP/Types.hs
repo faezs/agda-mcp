@@ -1,24 +1,38 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DeriveGeneric #-}
 
 module AgdaMCP.Types where
 
 import Data.Text (Text)
+import qualified Data.Aeson as JSON
+import GHC.Generics (Generic)
+
+-- Response format options for controlling output verbosity
+data ResponseFormat
+    = Concise  -- Human-readable, compact format (default)
+    | Full     -- Complete JSON with ranges for programmatic processing
+    deriving (Show, Eq, Generic)
+
+-- JSON instances for MCP protocol
+instance JSON.ToJSON ResponseFormat
+instance JSON.FromJSON ResponseFormat
 
 -- Tool definitions for Agda MCP server
 -- These will be automatically converted to MCP tool schemas via Template Haskell
+-- Note: format is Maybe Text for TH compatibility, parsed to ResponseFormat in handlers
 
 data AgdaTool
-    = AgdaLoad { file :: Text }
-    | AgdaGetGoals
-    | AgdaGetGoalType { goalId :: Int }
-    | AgdaGetContext { goalId :: Int }
-    | AgdaGive { goalId :: Int, expression :: Text }
-    | AgdaRefine { goalId :: Int, expression :: Text }
-    | AgdaCaseSplit { goalId :: Int, variable :: Text }
-    | AgdaCompute { goalId :: Int, expression :: Text }
-    | AgdaInferType { goalId :: Int, expression :: Text }
-    | AgdaIntro { goalId :: Int }
-    | AgdaWhyInScope { name :: Text }
+    = AgdaLoad { file :: Text, format :: Maybe Text }
+    | AgdaGetGoals { format :: Maybe Text }
+    | AgdaGetGoalType { goalId :: Int, format :: Maybe Text }
+    | AgdaGetContext { goalId :: Int, format :: Maybe Text }
+    | AgdaGive { goalId :: Int, expression :: Text, format :: Maybe Text }
+    | AgdaRefine { goalId :: Int, expression :: Text, format :: Maybe Text }
+    | AgdaCaseSplit { goalId :: Int, variable :: Text, format :: Maybe Text }
+    | AgdaCompute { goalId :: Int, expression :: Text, format :: Maybe Text }
+    | AgdaInferType { goalId :: Int, expression :: Text, format :: Maybe Text }
+    | AgdaIntro { goalId :: Int, format :: Maybe Text }
+    | AgdaWhyInScope { name :: Text, format :: Maybe Text }
     deriving (Show, Eq)
 
 -- Resource definitions for exposing Agda file information
@@ -49,6 +63,7 @@ agdaToolDescriptions =
     , ("expression", "Agda expression to use (e.g., 'zero', 'suc n', 'refl')")
     , ("variable", "Name of the variable to case-split on")
     , ("name", "Name to look up in scope")
+    , ("format", "Response format: \"Concise\" (default, human-readable, ~90% smaller) or \"Full\" (complete JSON with ranges for programmatic processing)")
     ]
 
 -- Human-readable descriptions for resources

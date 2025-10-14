@@ -8,6 +8,7 @@ import qualified Data.Aeson as JSON
 import qualified Data.Aeson.Key as JSON.Key
 import qualified Data.Aeson.KeyMap as JSON.KeyMap
 import qualified Data.Text as T
+import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
@@ -49,16 +50,43 @@ assertBool msg condition =
 assertFailure :: String -> IO ()
 assertFailure = error
 
--- | Helper to run a tool and get the response as JSON
+-- | Helper to run a tool and get the response as JSON (forces Full format)
 runTool :: IORef ServerState -> Types.AgdaTool -> IO JSON.Value
 runTool stateRef tool = do
-  result <- handleAgdaTool stateRef tool
+  -- Force Full format for JSON parsing
+  let toolWithFullFormat = setFormat tool (Just "Full")
+  result <- handleAgdaTool stateRef toolWithFullFormat
   case result of
     MCP.ContentText txt -> do
       case JSON.decode (LBS.fromStrict $ TE.encodeUtf8 txt) of
         Just val -> pure val
         Nothing -> error $ "Failed to parse JSON response: " ++ T.unpack txt
     _ -> error "Expected ContentText response"
+
+-- | Helper to run a tool and get concise text response
+runToolConcise :: IORef ServerState -> Types.AgdaTool -> IO Text
+runToolConcise stateRef tool = do
+  -- Force Concise format
+  let toolWithConciseFormat = setFormat tool (Just "Concise")
+  result <- handleAgdaTool stateRef toolWithConciseFormat
+  case result of
+    MCP.ContentText txt -> pure txt
+    _ -> error "Expected ContentText response"
+
+-- | Set format on a tool
+setFormat :: Types.AgdaTool -> Maybe Text -> Types.AgdaTool
+setFormat tool fmt = case tool of
+  Types.AgdaLoad{Types.file=f} -> Types.AgdaLoad{Types.file=f, Types.format=fmt}
+  Types.AgdaGetGoals{} -> Types.AgdaGetGoals{Types.format=fmt}
+  Types.AgdaGetGoalType{Types.goalId=gid} -> Types.AgdaGetGoalType{Types.goalId=gid, Types.format=fmt}
+  Types.AgdaGetContext{Types.goalId=gid} -> Types.AgdaGetContext{Types.goalId=gid, Types.format=fmt}
+  Types.AgdaGive{Types.goalId=gid, Types.expression=expr} -> Types.AgdaGive{Types.goalId=gid, Types.expression=expr, Types.format=fmt}
+  Types.AgdaRefine{Types.goalId=gid, Types.expression=expr} -> Types.AgdaRefine{Types.goalId=gid, Types.expression=expr, Types.format=fmt}
+  Types.AgdaCaseSplit{Types.goalId=gid, Types.variable=var} -> Types.AgdaCaseSplit{Types.goalId=gid, Types.variable=var, Types.format=fmt}
+  Types.AgdaCompute{Types.goalId=gid, Types.expression=expr} -> Types.AgdaCompute{Types.goalId=gid, Types.expression=expr, Types.format=fmt}
+  Types.AgdaInferType{Types.goalId=gid, Types.expression=expr} -> Types.AgdaInferType{Types.goalId=gid, Types.expression=expr, Types.format=fmt}
+  Types.AgdaIntro{Types.goalId=gid} -> Types.AgdaIntro{Types.goalId=gid, Types.format=fmt}
+  Types.AgdaWhyInScope{Types.name=n} -> Types.AgdaWhyInScope{Types.name=n, Types.format=fmt}
 
 -- | Helper to get a field from a JSON object
 getField :: T.Text -> JSON.Value -> Maybe JSON.Value
@@ -97,7 +125,7 @@ loadTests = testGroup "agda_load"
   [ simpleTestCase "loads file successfully and returns goals" $ do
       stateRef <- initServerState
       file <- exampleFile
-      let tool = Types.AgdaLoad { Types.file = T.pack file }
+      let tool = Types.AgdaLoad { Types.file = T.pack file, Types.format = Nothing }
       response <- runTool stateRef tool
 
       -- Should return DisplayInfo with AllGoalsWarnings
@@ -118,7 +146,7 @@ loadTests = testGroup "agda_load"
 
   , simpleTestCase "fails to load non-existent file" $ do
       stateRef <- initServerState
-      let tool = Types.AgdaLoad { Types.file = "/non/existent/file.agda" }
+      let tool = Types.AgdaLoad { Types.file = "/non/existent/file.agda", Types.format = Nothing }
       response <- runTool stateRef tool
 
       -- Should return an error response
@@ -134,10 +162,10 @@ getGoalsTests = testGroup "agda_get_goals"
       file <- exampleFile
 
       -- First load the file
-      _ <- handleAgdaTool stateRef (Types.AgdaLoad { Types.file = T.pack file })
+      _ <- handleAgdaTool stateRef (Types.AgdaLoad { Types.file = T.pack file, Types.format = Nothing })
 
       -- Then get goals
-      response <- runTool stateRef Types.AgdaGetGoals
+      response <- runTool stateRef (Types.AgdaGetGoals { Types.format = Nothing })
 
       let info = getField "info" response
       let visibleGoals = case info of
@@ -155,7 +183,7 @@ getGoalTypeTests :: TestTree
 getGoalTypeTests = testGroup "agda_get_goal_type"
   [ simpleTestCase "gets type of goal 0" $ do
       stateRef <- loadedState
-      let tool = Types.AgdaGetGoalType { Types.goalId = 0 }
+      let tool = Types.AgdaGetGoalType { Types.goalId = 0, Types.format = Nothing }
       response <- runTool stateRef tool
 
       -- Should return DisplayInfo with goal type
@@ -164,7 +192,7 @@ getGoalTypeTests = testGroup "agda_get_goal_type"
 
   , simpleTestCase "fails on invalid goal ID" $ do
       stateRef <- loadedState
-      let tool = Types.AgdaGetGoalType { Types.goalId = 999 }
+      let tool = Types.AgdaGetGoalType { Types.goalId = 999, Types.format = Nothing }
       response <- runTool stateRef tool
 
       -- Should return error
@@ -177,7 +205,7 @@ getContextTests :: TestTree
 getContextTests = testGroup "agda_get_context"
   [ simpleTestCase "gets context at goal 0" $ do
       stateRef <- loadedState
-      let tool = Types.AgdaGetContext { Types.goalId = 0 }
+      let tool = Types.AgdaGetContext { Types.goalId = 0, Types.format = Nothing }
       response <- runTool stateRef tool
 
       let kind = getField "kind" response
@@ -192,7 +220,7 @@ giveTests :: TestTree
 giveTests = testGroup "agda_give"
   [ simpleTestCase "successful give returns GiveAction" $ do
       stateRef <- loadedState
-      let tool = Types.AgdaGive { Types.goalId = 0, Types.expression = "n" }
+      let tool = Types.AgdaGive { Types.goalId = 0, Types.expression = "n", Types.format = Nothing }
       response <- runTool stateRef tool
 
       let kind = getField "kind" response
@@ -204,7 +232,7 @@ giveTests = testGroup "agda_give"
   , simpleTestCase "failed give returns error" $ do
       stateRef <- loadedState
       -- Use a completely invalid expression to trigger a parse/scope error
-      let tool = Types.AgdaGive { Types.goalId = 0, Types.expression = "nonExistentName123" }
+      let tool = Types.AgdaGive { Types.goalId = 0, Types.expression = "nonExistentName123", Types.format = Nothing }
       response <- runTool stateRef tool
 
       let kind = getField "kind" response
@@ -225,7 +253,7 @@ refineTests :: TestTree
 refineTests = testGroup "agda_refine"
   [ simpleTestCase "refines goal with constructor" $ do
       stateRef <- loadedState
-      let tool = Types.AgdaRefine { Types.goalId = 1, Types.expression = "suc" }
+      let tool = Types.AgdaRefine { Types.goalId = 1, Types.expression = "suc", Types.format = Nothing }
       response <- runTool stateRef tool
 
       -- Refine should return GiveAction
@@ -239,7 +267,7 @@ caseSplitTests :: TestTree
 caseSplitTests = testGroup "agda_case_split"
   [ simpleTestCase "splits on variable n" $ do
       stateRef <- loadedState
-      let tool = Types.AgdaCaseSplit { Types.goalId = 0, Types.variable = "n" }
+      let tool = Types.AgdaCaseSplit { Types.goalId = 0, Types.variable = "n", Types.format = Nothing }
       response <- runTool stateRef tool
 
       -- Case split returns MakeCase
@@ -253,7 +281,7 @@ computeTests :: TestTree
 computeTests = testGroup "agda_compute"
   [ simpleTestCase "computes expression" $ do
       stateRef <- loadedState
-      let tool = Types.AgdaCompute { Types.goalId = 0, Types.expression = "suc zero" }
+      let tool = Types.AgdaCompute { Types.goalId = 0, Types.expression = "suc zero", Types.format = Nothing }
       response <- runTool stateRef tool
 
       let kind = getField "kind" response
@@ -265,7 +293,7 @@ inferTypeTests :: TestTree
 inferTypeTests = testGroup "agda_infer_type"
   [ simpleTestCase "infers type of valid expression" $ do
       stateRef <- loadedState
-      let tool = Types.AgdaInferType { Types.goalId = 0, Types.expression = "suc zero" }
+      let tool = Types.AgdaInferType { Types.goalId = 0, Types.expression = "suc zero", Types.format = Nothing }
       response <- runTool stateRef tool
 
       let kind = getField "kind" response
@@ -277,7 +305,7 @@ introTests :: TestTree
 introTests = testGroup "agda_intro"
   [ simpleTestCase "introduces variables at identity goal" $ do
       stateRef <- loadedState
-      let tool = Types.AgdaIntro { Types.goalId = 4 }  -- identity function goal
+      let tool = Types.AgdaIntro { Types.goalId = 4, Types.format = Nothing }  -- identity function goal
       response <- runTool stateRef tool
 
       let kind = getField "kind" response
@@ -290,7 +318,7 @@ whyInScopeTests :: TestTree
 whyInScopeTests = testGroup "agda_why_in_scope"
   [ simpleTestCase "looks up existing name" $ do
       stateRef <- loadedState
-      let tool = Types.AgdaWhyInScope { Types.name = "suc" }
+      let tool = Types.AgdaWhyInScope { Types.name = "suc", Types.format = Nothing }
       response <- runTool stateRef tool
 
       let kind = getField "kind" response
@@ -298,7 +326,7 @@ whyInScopeTests = testGroup "agda_why_in_scope"
 
   , simpleTestCase "looks up non-existent name" $ do
       stateRef <- loadedState
-      let tool = Types.AgdaWhyInScope { Types.name = "nonExistentName123" }
+      let tool = Types.AgdaWhyInScope { Types.name = "nonExistentName123", Types.format = Nothing }
       response <- runTool stateRef tool
 
       let kind = getField "kind" response
@@ -310,5 +338,5 @@ loadedState :: IO (IORef ServerState)
 loadedState = do
   stateRef <- initServerState
   file <- exampleFile
-  _ <- handleAgdaTool stateRef (Types.AgdaLoad { Types.file = T.pack file })
+  _ <- handleAgdaTool stateRef (Types.AgdaLoad { Types.file = T.pack file, Types.format = Nothing })
   pure stateRef
