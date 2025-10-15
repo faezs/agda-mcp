@@ -179,8 +179,14 @@ toolToIOTCM currentFilePath tool =
     AgdaMCP.Types.AgdaGetGoalType{goalId} ->
       -- Goal operations use current file, noRange is acceptable since REPL tracks interaction points
       IOTCM currentFilePath None Direct (Cmd_goal_type Simplified (InteractionId goalId) noRange "")
+    AgdaMCP.Types.AgdaGetGoalTypeImplicits{goalId} ->
+      -- Show goal type with implicit arguments using Instantiated rewrite mode
+      IOTCM currentFilePath None Direct (Cmd_goal_type Instantiated (InteractionId goalId) noRange "")
     AgdaMCP.Types.AgdaGetContext{goalId} ->
       IOTCM currentFilePath None Direct (Cmd_context Simplified (InteractionId goalId) noRange "")
+    AgdaMCP.Types.AgdaGetContextImplicits{goalId} ->
+      -- Show context with implicit arguments using Instantiated rewrite mode
+      IOTCM currentFilePath None Direct (Cmd_context Instantiated (InteractionId goalId) noRange "")
     AgdaMCP.Types.AgdaGive{goalId, expression} ->
       IOTCM currentFilePath None Direct (Cmd_give WithoutForce (InteractionId goalId) noRange (T.unpack expression))
     AgdaMCP.Types.AgdaRefine{goalId, expression} ->

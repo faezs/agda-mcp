@@ -26,7 +26,9 @@ data AgdaTool
     = AgdaLoad { file :: Text, format :: Maybe Text }
     | AgdaGetGoals { format :: Maybe Text }
     | AgdaGetGoalType { goalId :: Int, format :: Maybe Text }
+    | AgdaGetGoalTypeImplicits { goalId :: Int, format :: Maybe Text }
     | AgdaGetContext { goalId :: Int, format :: Maybe Text }
+    | AgdaGetContextImplicits { goalId :: Int, format :: Maybe Text }
     | AgdaGive { goalId :: Int, expression :: Text, format :: Maybe Text }
     | AgdaRefine { goalId :: Int, expression :: Text, format :: Maybe Text }
     | AgdaCaseSplit { goalId :: Int, variable :: Text, format :: Maybe Text }
@@ -57,7 +59,9 @@ agdaToolDescriptions =
     [ ("AgdaLoad", "Load and type-check an Agda file")
     , ("AgdaGetGoals", "List all goals/holes in the currently loaded file")
     , ("AgdaGetGoalType", "Get the type of a specific goal")
+    , ("AgdaGetGoalTypeImplicits", "Get the type of a specific goal with implicit arguments shown")
     , ("AgdaGetContext", "Get the context (available variables and their types) at a goal")
+    , ("AgdaGetContextImplicits", "Get the context at a goal with implicit arguments shown")
     , ("AgdaGive", "Fill a goal/hole with an expression")
     , ("AgdaRefine", "Refine a goal with a constructor or function, introducing new sub-goals")
     , ("AgdaCaseSplit", "Split a goal by pattern matching on a variable")

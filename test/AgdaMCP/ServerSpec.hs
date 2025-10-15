@@ -80,7 +80,9 @@ setFormat tool fmt = case tool of
   Types.AgdaLoad{Types.file=f} -> Types.AgdaLoad{Types.file=f, Types.format=fmt}
   Types.AgdaGetGoals{} -> Types.AgdaGetGoals{Types.format=fmt}
   Types.AgdaGetGoalType{Types.goalId=gid} -> Types.AgdaGetGoalType{Types.goalId=gid, Types.format=fmt}
+  Types.AgdaGetGoalTypeImplicits{Types.goalId=gid} -> Types.AgdaGetGoalTypeImplicits{Types.goalId=gid, Types.format=fmt}
   Types.AgdaGetContext{Types.goalId=gid} -> Types.AgdaGetContext{Types.goalId=gid, Types.format=fmt}
+  Types.AgdaGetContextImplicits{Types.goalId=gid} -> Types.AgdaGetContextImplicits{Types.goalId=gid, Types.format=fmt}
   Types.AgdaGive{Types.goalId=gid, Types.expression=expr} -> Types.AgdaGive{Types.goalId=gid, Types.expression=expr, Types.format=fmt}
   Types.AgdaRefine{Types.goalId=gid, Types.expression=expr} -> Types.AgdaRefine{Types.goalId=gid, Types.expression=expr, Types.format=fmt}
   Types.AgdaCaseSplit{Types.goalId=gid, Types.variable=var} -> Types.AgdaCaseSplit{Types.goalId=gid, Types.variable=var, Types.format=fmt}
@@ -105,7 +107,9 @@ tests = testGroup "AgdaMCP.Server Tests"
   [ loadTests
   , getGoalsTests
   , getGoalTypeTests
+  , getGoalTypeImplicitsTests
   , getContextTests
+  , getContextImplicitsTests
   , giveTests
   , refineTests
   , caseSplitTests
@@ -213,6 +217,27 @@ getGoalTypeTests = testGroup "agda_get_goal_type"
       assertBool "Should have error" (kind == Just (JSON.String "DisplayInfo"))
   ]
 
+getGoalTypeImplicitsTests :: TestTree
+getGoalTypeImplicitsTests = testGroup "agda_get_goal_type_implicits"
+  [ simpleTestCase "gets type of goal 0 with implicits" $ do
+      stateRef <- loadedState
+      let tool = Types.AgdaGetGoalTypeImplicits { Types.goalId = 0, Types.format = Nothing }
+      response <- runTool stateRef tool
+
+      -- Should return DisplayInfo with goal type (showing implicit arguments)
+      let kind = getField "kind" response
+      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
+
+  , simpleTestCase "fails on invalid goal ID" $ do
+      stateRef <- loadedState
+      let tool = Types.AgdaGetGoalTypeImplicits { Types.goalId = 999, Types.format = Nothing }
+      response <- runTool stateRef tool
+
+      -- Should return error
+      let kind = getField "kind" response
+      assertBool "Should have error" (kind == Just (JSON.String "DisplayInfo"))
+  ]
+
 -- | Tests for agda_get_context
 getContextTests :: TestTree
 getContextTests = testGroup "agda_get_context"
@@ -226,6 +251,18 @@ getContextTests = testGroup "agda_get_context"
 
       -- Context should contain variable 'n'
       -- (We can't easily assert the exact content without parsing the full structure)
+  ]
+
+getContextImplicitsTests :: TestTree
+getContextImplicitsTests = testGroup "agda_get_context_implicits"
+  [ simpleTestCase "gets context at goal 0 with implicits" $ do
+      stateRef <- loadedState
+      let tool = Types.AgdaGetContextImplicits { Types.goalId = 0, Types.format = Nothing }
+      response <- runTool stateRef tool
+
+      -- Should return DisplayInfo with context (showing implicit arguments in types)
+      let kind = getField "kind" response
+      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
   ]
 
 -- | Tests for agda_give
