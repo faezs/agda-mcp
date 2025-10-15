@@ -91,6 +91,9 @@ setFormat tool fmt = case tool of
   Types.AgdaIntro{Types.goalId=gid} -> Types.AgdaIntro{Types.goalId=gid, Types.format=fmt}
   Types.AgdaAuto{Types.goalId=gid, Types.timeout=t} -> Types.AgdaAuto{Types.goalId=gid, Types.timeout=t, Types.format=fmt}
   Types.AgdaAutoAll{Types.timeout=t} -> Types.AgdaAutoAll{Types.timeout=t, Types.format=fmt}
+  Types.AgdaSolveOne{Types.goalId=gid} -> Types.AgdaSolveOne{Types.goalId=gid, Types.format=fmt}
+  Types.AgdaHelperFunction{Types.goalId=gid, Types.helperName=name} -> Types.AgdaHelperFunction{Types.goalId=gid, Types.helperName=name, Types.format=fmt}
+  Types.AgdaGoalTypeContext{Types.goalId=gid} -> Types.AgdaGoalTypeContext{Types.goalId=gid, Types.format=fmt}
   Types.AgdaSearchAbout{Types.query=q} -> Types.AgdaSearchAbout{Types.query=q, Types.format=fmt}
   Types.AgdaShowModule{Types.moduleName=m} -> Types.AgdaShowModule{Types.moduleName=m, Types.format=fmt}
   Types.AgdaShowConstraints{} -> Types.AgdaShowConstraints{Types.format=fmt}
@@ -118,6 +121,9 @@ tests = testGroup "AgdaMCP.Server Tests"
   , introTests
   , autoTests
   , autoAllTests
+  , solveOneTests
+  , helperFunctionTests
+  , goalTypeContextTests
   , searchAboutTests
   , showModuleTests
   , showConstraintsTests
@@ -412,6 +418,45 @@ autoAllTests = testGroup "agda_auto_all"
         (kind == Just (JSON.String "SolveAll") ||
          kind == Just (JSON.String "GiveAction") ||
          kind == Just (JSON.String "DisplayInfo"))
+  ]
+
+solveOneTests :: TestTree
+solveOneTests = testGroup "agda_solve_one"
+  [ simpleTestCase "attempts to solve goal 0" $ do
+      stateRef <- loadedState
+      let tool = Types.AgdaSolveOne { Types.goalId = 0, Types.format = Nothing }
+      response <- runTool stateRef tool
+
+      -- Should return SolveAll, GiveAction, or DisplayInfo
+      let kind = getField "kind" response
+      assertBool "Should be SolveAll, GiveAction, or DisplayInfo"
+        (kind == Just (JSON.String "SolveAll") ||
+         kind == Just (JSON.String "GiveAction") ||
+         kind == Just (JSON.String "DisplayInfo"))
+  ]
+
+helperFunctionTests :: TestTree
+helperFunctionTests = testGroup "agda_helper_function"
+  [ simpleTestCase "generates helper function for goal 0" $ do
+      stateRef <- loadedState
+      let tool = Types.AgdaHelperFunction { Types.goalId = 0, Types.helperName = "helper", Types.format = Nothing }
+      response <- runTool stateRef tool
+
+      -- Should return DisplayInfo with helper function suggestion
+      let kind = getField "kind" response
+      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
+  ]
+
+goalTypeContextTests :: TestTree
+goalTypeContextTests = testGroup "agda_goal_type_context"
+  [ simpleTestCase "gets type and context for goal 0" $ do
+      stateRef <- loadedState
+      let tool = Types.AgdaGoalTypeContext { Types.goalId = 0, Types.format = Nothing }
+      response <- runTool stateRef tool
+
+      -- Should return DisplayInfo with both goal type and context
+      let kind = getField "kind" response
+      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
   ]
 
 -- | Tests for agda_search_about

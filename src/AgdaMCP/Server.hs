@@ -203,6 +203,12 @@ toolToIOTCM currentFilePath tool =
       IOTCM currentFilePath None Direct (Cmd_autoOne Simplified (InteractionId goalId) noRange "")
     AgdaMCP.Types.AgdaAutoAll{} ->
       IOTCM currentFilePath None Direct (Cmd_autoAll Simplified)
+    AgdaMCP.Types.AgdaSolveOne{goalId} ->
+      IOTCM currentFilePath None Direct (Cmd_solveOne Simplified (InteractionId goalId) noRange "")
+    AgdaMCP.Types.AgdaHelperFunction{goalId, helperName} ->
+      IOTCM currentFilePath None Direct (Cmd_helper_function Simplified (InteractionId goalId) noRange (T.unpack helperName))
+    AgdaMCP.Types.AgdaGoalTypeContext{goalId} ->
+      IOTCM currentFilePath None Direct (Cmd_goal_type_context Simplified (InteractionId goalId) noRange "")
     AgdaMCP.Types.AgdaSearchAbout{query} ->
       IOTCM currentFilePath None Direct (Cmd_search_about_toplevel Simplified (T.unpack query))
     AgdaMCP.Types.AgdaShowModule{moduleName} ->

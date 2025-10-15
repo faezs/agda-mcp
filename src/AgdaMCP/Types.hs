@@ -37,6 +37,9 @@ data AgdaTool
     | AgdaIntro { goalId :: Int, format :: Maybe Text }
     | AgdaAuto { goalId :: Int, timeout :: Maybe Int, format :: Maybe Text }
     | AgdaAutoAll { timeout :: Maybe Int, format :: Maybe Text }
+    | AgdaSolveOne { goalId :: Int, format :: Maybe Text }
+    | AgdaHelperFunction { goalId :: Int, helperName :: Text, format :: Maybe Text }
+    | AgdaGoalTypeContext { goalId :: Int, format :: Maybe Text }
     | AgdaSearchAbout { query :: Text, format :: Maybe Text }
     | AgdaShowModule { moduleName :: Text, format :: Maybe Text }
     | AgdaShowConstraints { format :: Maybe Text }
@@ -70,6 +73,9 @@ agdaToolDescriptions =
     , ("AgdaIntro", "Introduce variables using the intro tactic (generates suggestions)")
     , ("AgdaAuto", "Attempt automatic proof search to fill a goal (uses Agda's Auto/Agsy tactic)")
     , ("AgdaAutoAll", "Attempt automatic proof search on all goals in the file (batch auto operation)")
+    , ("AgdaSolveOne", "Attempt to solve a specific goal using Agda's constraint solver")
+    , ("AgdaHelperFunction", "Generate a helper function skeleton for a goal (useful for refactoring)")
+    , ("AgdaGoalTypeContext", "Get both the goal type and context together (more efficient than separate calls)")
     , ("AgdaSearchAbout", "Search for definitions by name or type signature (Hoogle-style search)")
     , ("AgdaShowModule", "Show the contents of a module (all exported definitions, types, and submodules)")
     , ("AgdaShowConstraints", "Show all unsolved type-checking constraints in the current file")
@@ -82,6 +88,7 @@ agdaToolDescriptions =
     , ("variable", "Name of the variable to case-split on")
     , ("query", "Search query: can be a name pattern or type signature to search for")
     , ("name", "Name to look up in scope")
+    , ("helperName", "Suggested name for the generated helper function")
     , ("timeout", "Optional timeout in milliseconds for proof search (default: 5000)")
     , ("format", "Response format: \"Concise\" (default, human-readable, ~90% smaller) or \"Full\" (complete JSON with ranges for programmatic processing)")
     ]
