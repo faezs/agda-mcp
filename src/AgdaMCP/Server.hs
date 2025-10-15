@@ -195,10 +195,14 @@ toolToIOTCM currentFilePath tool =
       IOTCM currentFilePath None Direct (Cmd_intro False (InteractionId goalId) noRange "")
     AgdaMCP.Types.AgdaAuto{goalId} ->
       IOTCM currentFilePath None Direct (Cmd_autoOne Simplified (InteractionId goalId) noRange "")
+    AgdaMCP.Types.AgdaAutoAll{} ->
+      IOTCM currentFilePath None Direct (Cmd_autoAll Simplified)
     AgdaMCP.Types.AgdaSearchAbout{query} ->
       IOTCM currentFilePath None Direct (Cmd_search_about_toplevel Simplified (T.unpack query))
     AgdaMCP.Types.AgdaShowModule{moduleName} ->
       IOTCM currentFilePath None Direct (Cmd_show_module_contents_toplevel Simplified (T.unpack moduleName))
+    AgdaMCP.Types.AgdaShowConstraints{} ->
+      IOTCM currentFilePath None Direct Cmd_constraints
     AgdaMCP.Types.AgdaWhyInScope{name} ->
       IOTCM currentFilePath None Direct (Cmd_why_in_scope_toplevel (T.unpack name))
     AgdaMCP.Types.AgdaListPostulates{file} ->

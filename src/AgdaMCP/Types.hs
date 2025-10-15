@@ -34,8 +34,10 @@ data AgdaTool
     | AgdaInferType { goalId :: Int, expression :: Text, format :: Maybe Text }
     | AgdaIntro { goalId :: Int, format :: Maybe Text }
     | AgdaAuto { goalId :: Int, timeout :: Maybe Int, format :: Maybe Text }
+    | AgdaAutoAll { timeout :: Maybe Int, format :: Maybe Text }
     | AgdaSearchAbout { query :: Text, format :: Maybe Text }
     | AgdaShowModule { moduleName :: Text, format :: Maybe Text }
+    | AgdaShowConstraints { format :: Maybe Text }
     | AgdaWhyInScope { name :: Text, format :: Maybe Text }
     | AgdaListPostulates { file :: Text, format :: Maybe Text }
     deriving (Show, Eq)
@@ -63,8 +65,10 @@ agdaToolDescriptions =
     , ("AgdaInferType", "Infer the type of an expression in a goal's context")
     , ("AgdaIntro", "Introduce variables using the intro tactic (generates suggestions)")
     , ("AgdaAuto", "Attempt automatic proof search to fill a goal (uses Agda's Auto/Agsy tactic)")
+    , ("AgdaAutoAll", "Attempt automatic proof search on all goals in the file (batch auto operation)")
     , ("AgdaSearchAbout", "Search for definitions by name or type signature (Hoogle-style search)")
     , ("AgdaShowModule", "Show the contents of a module (all exported definitions, types, and submodules)")
+    , ("AgdaShowConstraints", "Show all unsolved type-checking constraints in the current file")
     , ("AgdaWhyInScope", "Look up documentation and scope information for a name")
     , ("AgdaListPostulates", "List all postulates in a file with their names, types, and positions. Useful for converting postulates to holes for implementation.")
     , ("file", "Path to the Agda file")

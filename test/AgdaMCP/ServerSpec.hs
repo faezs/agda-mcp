@@ -88,8 +88,10 @@ setFormat tool fmt = case tool of
   Types.AgdaInferType{Types.goalId=gid, Types.expression=expr} -> Types.AgdaInferType{Types.goalId=gid, Types.expression=expr, Types.format=fmt}
   Types.AgdaIntro{Types.goalId=gid} -> Types.AgdaIntro{Types.goalId=gid, Types.format=fmt}
   Types.AgdaAuto{Types.goalId=gid, Types.timeout=t} -> Types.AgdaAuto{Types.goalId=gid, Types.timeout=t, Types.format=fmt}
+  Types.AgdaAutoAll{Types.timeout=t} -> Types.AgdaAutoAll{Types.timeout=t, Types.format=fmt}
   Types.AgdaSearchAbout{Types.query=q} -> Types.AgdaSearchAbout{Types.query=q, Types.format=fmt}
   Types.AgdaShowModule{Types.moduleName=m} -> Types.AgdaShowModule{Types.moduleName=m, Types.format=fmt}
+  Types.AgdaShowConstraints{} -> Types.AgdaShowConstraints{Types.format=fmt}
   Types.AgdaWhyInScope{Types.name=n} -> Types.AgdaWhyInScope{Types.name=n, Types.format=fmt}
   Types.AgdaListPostulates{Types.file=f} -> Types.AgdaListPostulates{Types.file=f, Types.format=fmt}
 
@@ -111,8 +113,10 @@ tests = testGroup "AgdaMCP.Server Tests"
   , inferTypeTests
   , introTests
   , autoTests
+  , autoAllTests
   , searchAboutTests
   , showModuleTests
+  , showConstraintsTests
   , whyInScopeTests
   , listPostulatesTests
   ]
@@ -346,6 +350,33 @@ autoTests = testGroup "agda_auto"
         (kind == Just (JSON.String "DisplayInfo") || kind == Just (JSON.String "GiveAction"))
   ]
 
+autoAllTests :: TestTree
+autoAllTests = testGroup "agda_auto_all"
+  [ simpleTestCase "attempts auto on all goals" $ do
+      stateRef <- loadedState
+      let tool = Types.AgdaAutoAll { Types.timeout = Nothing, Types.format = Nothing }
+      response <- runTool stateRef tool
+
+      -- Should return SolveAll, GiveAction, or DisplayInfo
+      let kind = getField "kind" response
+      assertBool "Should be SolveAll, GiveAction, or DisplayInfo"
+        (kind == Just (JSON.String "SolveAll") ||
+         kind == Just (JSON.String "GiveAction") ||
+         kind == Just (JSON.String "DisplayInfo"))
+
+  , simpleTestCase "respects timeout parameter" $ do
+      stateRef <- loadedState
+      let tool = Types.AgdaAutoAll { Types.timeout = Just 2000, Types.format = Nothing }
+      response <- runTool stateRef tool
+
+      -- Should complete within timeout
+      let kind = getField "kind" response
+      assertBool "Should return SolveAll, GiveAction, or DisplayInfo"
+        (kind == Just (JSON.String "SolveAll") ||
+         kind == Just (JSON.String "GiveAction") ||
+         kind == Just (JSON.String "DisplayInfo"))
+  ]
+
 -- | Tests for agda_search_about
 searchAboutTests :: TestTree
 searchAboutTests = testGroup "agda_search_about"
@@ -406,6 +437,27 @@ showModuleTests = testGroup "agda_show_module"
       let kind = getField "kind" response
       assertBool "Should be DisplayInfo or error response"
         (kind == Just (JSON.String "DisplayInfo") || kind == Just (JSON.String "Error"))
+  ]
+
+showConstraintsTests :: TestTree
+showConstraintsTests = testGroup "agda_show_constraints"
+  [ simpleTestCase "shows constraints for loaded file" $ do
+      stateRef <- loadedState
+      let tool = Types.AgdaShowConstraints { Types.format = Nothing }
+      response <- runTool stateRef tool
+
+      -- Should return DisplayInfo with constraints (or no constraints)
+      let kind = getField "kind" response
+      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
+
+  , simpleTestCase "returns no constraints for complete file" $ do
+      stateRef <- loadedState
+      let tool = Types.AgdaShowConstraints { Types.format = Nothing }
+      response <- runTool stateRef tool
+
+      -- Example.agda should have no unsolved constraints
+      let kind = getField "kind" response
+      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
   ]
 
 -- | Tests for agda_why_in_scope

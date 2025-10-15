@@ -33,6 +33,7 @@ formatResponse Types.Concise jsonValue =
       Just (JSON.String "DisplayInfo") -> formatDisplayInfo jsonValue
       Just (JSON.String "GiveAction") -> formatGiveAction jsonValue
       Just (JSON.String "MakeCase") -> formatMakeCase jsonValue
+      Just (JSON.String "SolveAll") -> formatSolveAll jsonValue
       _ -> "Response: " <> TE.decodeUtf8 (LBS.toStrict $ JSON.encode jsonValue)
 
 -- | Extract format parameter from tool (default to Concise)
@@ -51,8 +52,10 @@ getFormat tool =
         Types.AgdaInferType{Types.format=fmt} -> fmt
         Types.AgdaIntro{Types.format=fmt} -> fmt
         Types.AgdaAuto{Types.format=fmt} -> fmt
+        Types.AgdaAutoAll{Types.format=fmt} -> fmt
         Types.AgdaSearchAbout{Types.format=fmt} -> fmt
         Types.AgdaShowModule{Types.format=fmt} -> fmt
+        Types.AgdaShowConstraints{Types.format=fmt} -> fmt
         Types.AgdaWhyInScope{Types.format=fmt} -> fmt
         Types.AgdaListPostulates{Types.format=fmt} -> fmt
   in parseFormat formatText
@@ -85,6 +88,7 @@ formatDisplayInfo jsonValue =
       Just (JSON.String "Auto") -> formatAuto infoValue
       Just (JSON.String "SearchAbout") -> formatSearchAbout infoValue
       Just (JSON.String "ModuleContents") -> formatModuleContents infoValue
+      Just (JSON.String "Constraints") -> formatConstraints infoValue
       _ -> "DisplayInfo: " <> extractText infoValue
     _ -> "DisplayInfo (no info)"
 
@@ -238,6 +242,25 @@ formatModuleContents infoValue =
         (Just (JSON.String n), Nothing) -> n  -- Submodule without type
         _ -> extractText entry
 
+-- Format constraints (unsolved type-checking constraints)
+formatConstraints :: JSON.Value -> Text
+formatConstraints infoValue =
+  case getField "constraints" infoValue of
+    Just (JSON.Array constraints) ->
+      if V.null constraints
+        then "No constraints"
+        else
+          let count = V.length constraints
+              formatted = V.toList $ V.map formatConstraint constraints
+          in T.pack (show count) <> " constraints:\n  " <> T.intercalate "\n  " formatted
+    _ -> "Constraints: " <> extractText infoValue
+  where
+    formatConstraint :: JSON.Value -> Text
+    formatConstraint constraint =
+      case getField "constraint" constraint of
+        Just (JSON.String c) -> c
+        _ -> extractText constraint
+
 -- ============================================================================
 -- GiveAction Formatting
 -- ============================================================================
@@ -271,6 +294,29 @@ formatMakeCase jsonValue =
       clauseCount = length clauses
   in "Split ?" <> goalId <> " into " <> T.pack (show clauseCount) <> " clauses:\n  " <>
      T.intercalate "\n  " clauses
+
+-- ============================================================================
+-- SolveAll Formatting
+-- ============================================================================
+
+formatSolveAll :: JSON.Value -> Text
+formatSolveAll jsonValue =
+  case getField "solutions" jsonValue of
+    Just (JSON.Array solutions) ->
+      if V.null solutions
+        then "No goals solved"
+        else
+          let count = V.length solutions
+              formatted = V.toList $ V.map formatSolution solutions
+          in "✓ Solved " <> T.pack (show count) <> " goals:\n  " <> T.intercalate "\n  " formatted
+    _ -> "SolveAll: " <> extractText jsonValue
+  where
+    formatSolution :: JSON.Value -> Text
+    formatSolution sol =
+      case (getField "goalId" sol, getField "expression" sol) of
+        (Just (JSON.Number gid), Just (JSON.String expr)) ->
+          "?" <> T.pack (show (floor gid :: Int)) <> " := " <> expr
+        _ -> extractText sol
 
 -- ============================================================================
 -- Postulates Formatting
