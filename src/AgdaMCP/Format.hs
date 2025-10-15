@@ -12,7 +12,6 @@ import qualified Data.Text as T
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Text.Encoding as TE
 import Data.Text (Text)
-import Data.Maybe (fromMaybe)
 import qualified Data.Vector as V
 
 import qualified AgdaMCP.Types as Types
@@ -25,11 +24,16 @@ formatResponse Types.Full jsonValue =
 
 formatResponse Types.Concise jsonValue =
   -- Concise format: extract key information and format for humans
-  case getField "kind" jsonValue of
-    Just (JSON.String "DisplayInfo") -> formatDisplayInfo jsonValue
-    Just (JSON.String "GiveAction") -> formatGiveAction jsonValue
-    Just (JSON.String "MakeCase") -> formatMakeCase jsonValue
-    _ -> "Response: " <> TE.decodeUtf8 (LBS.toStrict $ JSON.encode jsonValue)
+  case jsonValue of
+    -- Check for postulates list (JSON array with pName/pType/pRange fields)
+    JSON.Array arr | not (V.null arr) && isPostulateArray arr ->
+      formatPostulates jsonValue
+    -- Check for standard Agda response with "kind" field
+    _ -> case getField "kind" jsonValue of
+      Just (JSON.String "DisplayInfo") -> formatDisplayInfo jsonValue
+      Just (JSON.String "GiveAction") -> formatGiveAction jsonValue
+      Just (JSON.String "MakeCase") -> formatMakeCase jsonValue
+      _ -> "Response: " <> TE.decodeUtf8 (LBS.toStrict $ JSON.encode jsonValue)
 
 -- | Extract format parameter from tool (default to Concise)
 -- Parse the Maybe Text field to ResponseFormat
@@ -46,7 +50,11 @@ getFormat tool =
         Types.AgdaCompute{Types.format=fmt} -> fmt
         Types.AgdaInferType{Types.format=fmt} -> fmt
         Types.AgdaIntro{Types.format=fmt} -> fmt
+        Types.AgdaAuto{Types.format=fmt} -> fmt
+        Types.AgdaSearchAbout{Types.format=fmt} -> fmt
+        Types.AgdaShowModule{Types.format=fmt} -> fmt
         Types.AgdaWhyInScope{Types.format=fmt} -> fmt
+        Types.AgdaListPostulates{Types.format=fmt} -> fmt
   in parseFormat formatText
 
 -- | Parse format string to ResponseFormat (default: Concise)
@@ -74,6 +82,9 @@ formatDisplayInfo jsonValue =
       Just (JSON.String "GoalType") -> formatGoalType infoValue
       Just (JSON.String "WhyInScope") -> formatWhyInScope infoValue
       Just (JSON.String "Intro") -> formatIntro infoValue
+      Just (JSON.String "Auto") -> formatAuto infoValue
+      Just (JSON.String "SearchAbout") -> formatSearchAbout infoValue
+      Just (JSON.String "ModuleContents") -> formatModuleContents infoValue
       _ -> "DisplayInfo: " <> extractText infoValue
     _ -> "DisplayInfo (no info)"
 
@@ -151,6 +162,7 @@ formatContextEntry :: JSON.Value -> Text
 formatContextEntry entry =
   let name = case getField "originalName" entry of
         Just (JSON.String n) -> n
+        Just _ -> "?"
         Nothing -> case getField "reifiedName" entry of
           Just (JSON.String n) -> n
           _ -> "?"
@@ -179,6 +191,52 @@ formatWhyInScope infoValue =
 formatIntro :: JSON.Value -> Text
 formatIntro infoValue =
   "Intro: " <> extractText infoValue
+
+-- Format auto proof search results
+formatAuto :: JSON.Value -> Text
+formatAuto infoValue =
+  case getField "autoResult" infoValue of
+    Just (JSON.String result) -> "Auto: " <> result
+    _ -> "Auto: " <> extractText infoValue
+
+-- Format search about results (type search)
+formatSearchAbout :: JSON.Value -> Text
+formatSearchAbout infoValue =
+  case getField "searchResults" infoValue of
+    Just (JSON.Array results) ->
+      if V.null results
+        then "No results found"
+        else
+          let count = V.length results
+              formatted = V.toList $ V.map formatSearchResult results
+          in T.pack (show count) <> " results:\n  " <> T.intercalate "\n  " formatted
+    _ -> "SearchAbout: " <> extractText infoValue
+  where
+    formatSearchResult :: JSON.Value -> Text
+    formatSearchResult result =
+      case (getField "name" result, getField "type" result) of
+        (Just (JSON.String n), Just (JSON.String t)) -> n <> " : " <> t
+        _ -> extractText result
+
+-- Format module contents (definitions, types, submodules)
+formatModuleContents :: JSON.Value -> Text
+formatModuleContents infoValue =
+  case getField "contents" infoValue of
+    Just (JSON.Array contents) ->
+      if V.null contents
+        then "Module is empty"
+        else
+          let count = V.length contents
+              formatted = V.toList $ V.map formatModuleEntry contents
+          in T.pack (show count) <> " definitions:\n  " <> T.intercalate "\n  " formatted
+    _ -> "ModuleContents: " <> extractText infoValue
+  where
+    formatModuleEntry :: JSON.Value -> Text
+    formatModuleEntry entry =
+      case (getField "name" entry, getField "type" entry) of
+        (Just (JSON.String n), Just (JSON.String t)) -> n <> " : " <> t
+        (Just (JSON.String n), Nothing) -> n  -- Submodule without type
+        _ -> extractText entry
 
 -- ============================================================================
 -- GiveAction Formatting
@@ -213,6 +271,52 @@ formatMakeCase jsonValue =
       clauseCount = length clauses
   in "Split ?" <> goalId <> " into " <> T.pack (show clauseCount) <> " clauses:\n  " <>
      T.intercalate "\n  " clauses
+
+-- ============================================================================
+-- Postulates Formatting
+-- ============================================================================
+
+-- Check if array contains postulate objects (has pName, pType, pRange fields)
+isPostulateArray :: V.Vector JSON.Value -> Bool
+isPostulateArray arr =
+  case V.headM arr of
+    Nothing -> False
+    Just firstElem -> case firstElem of
+      JSON.Object obj ->
+        let hasPName = JSON.KeyMap.member (JSON.Key.fromText "pName") obj
+            hasPType = JSON.KeyMap.member (JSON.Key.fromText "pType") obj
+            hasPRange = JSON.KeyMap.member (JSON.Key.fromText "pRange") obj
+        in hasPName && hasPType && hasPRange
+      _ -> False
+
+formatPostulates :: JSON.Value -> Text
+formatPostulates (JSON.Array arr) =
+  let postulates = V.toList arr
+      count = length postulates
+      names = V.toList $ V.mapMaybe extractPostulateName arr
+      lines' = V.toList $ V.mapMaybe extractPostulateLine arr
+  in if count == 0
+       then "No postulates found"
+       else T.pack (show count) <> " postulates: " <>
+            T.intercalate ", " names <>
+            " at lines " <>
+            T.intercalate ", " (map (T.pack . show) lines')
+formatPostulates _ = "Invalid postulates format"
+
+-- Extract postulate name from JSON object
+extractPostulateName :: JSON.Value -> Maybe Text
+extractPostulateName val = getField "pName" val >>= extractString
+
+-- Extract postulate line number from JSON object
+extractPostulateLine :: JSON.Value -> Maybe Int
+extractPostulateLine val = do
+  pRange <- getField "pRange" val
+  case pRange of
+    JSON.Array rangeArr | V.length rangeArr >= 1 ->
+      case rangeArr V.! 0 of
+        JSON.Number n -> Just (floor n :: Int)
+        _ -> Nothing
+    _ -> Nothing
 
 -- ============================================================================
 -- Utility Functions

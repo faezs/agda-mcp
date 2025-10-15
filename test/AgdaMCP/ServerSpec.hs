@@ -11,6 +11,7 @@ import qualified Data.Text as T
 import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.Vector as V
 import Data.IORef
 import System.FilePath ((</>))
 import System.Directory (getCurrentDirectory)
@@ -86,17 +87,16 @@ setFormat tool fmt = case tool of
   Types.AgdaCompute{Types.goalId=gid, Types.expression=expr} -> Types.AgdaCompute{Types.goalId=gid, Types.expression=expr, Types.format=fmt}
   Types.AgdaInferType{Types.goalId=gid, Types.expression=expr} -> Types.AgdaInferType{Types.goalId=gid, Types.expression=expr, Types.format=fmt}
   Types.AgdaIntro{Types.goalId=gid} -> Types.AgdaIntro{Types.goalId=gid, Types.format=fmt}
+  Types.AgdaAuto{Types.goalId=gid, Types.timeout=t} -> Types.AgdaAuto{Types.goalId=gid, Types.timeout=t, Types.format=fmt}
+  Types.AgdaSearchAbout{Types.query=q} -> Types.AgdaSearchAbout{Types.query=q, Types.format=fmt}
+  Types.AgdaShowModule{Types.moduleName=m} -> Types.AgdaShowModule{Types.moduleName=m, Types.format=fmt}
   Types.AgdaWhyInScope{Types.name=n} -> Types.AgdaWhyInScope{Types.name=n, Types.format=fmt}
+  Types.AgdaListPostulates{Types.file=f} -> Types.AgdaListPostulates{Types.file=f, Types.format=fmt}
 
 -- | Helper to get a field from a JSON object
 getField :: T.Text -> JSON.Value -> Maybe JSON.Value
 getField field (JSON.Object obj) = JSON.KeyMap.lookup (JSON.Key.fromText field) obj
 getField _ _ = Nothing
-
--- | Helper to get array length
-arrayLength :: JSON.Value -> Int
-arrayLength (JSON.Array arr) = length arr
-arrayLength _ = 0
 
 tests :: TestTree
 tests = testGroup "AgdaMCP.Server Tests"
@@ -110,7 +110,11 @@ tests = testGroup "AgdaMCP.Server Tests"
   , computeTests
   , inferTypeTests
   , introTests
+  , autoTests
+  , searchAboutTests
+  , showModuleTests
   , whyInScopeTests
+  , listPostulatesTests
   ]
 
 -- Test data
@@ -118,6 +122,11 @@ exampleFile :: IO FilePath
 exampleFile = do
   cwd <- getCurrentDirectory
   pure $ cwd </> "test" </> "Example.agda"
+
+postulateFile :: IO FilePath
+postulateFile = do
+  cwd <- getCurrentDirectory
+  pure $ cwd </> "test" </> "PostulateTest.agda"
 
 -- | Tests for agda_load
 loadTests :: TestTree
@@ -313,6 +322,92 @@ introTests = testGroup "agda_intro"
         (kind == Just (JSON.String "GiveAction") || kind == Just (JSON.String "DisplayInfo"))
   ]
 
+-- | Tests for agda_auto
+autoTests :: TestTree
+autoTests = testGroup "agda_auto"
+  [ simpleTestCase "attempts auto on simple goal" $ do
+      stateRef <- loadedState
+      let tool = Types.AgdaAuto { Types.goalId = 0, Types.timeout = Nothing, Types.format = Nothing }
+      response <- runTool stateRef tool
+
+      -- Auto may succeed (GiveAction) or fail (DisplayInfo with error/auto result)
+      let kind = getField "kind" response
+      assertBool "Should be DisplayInfo or GiveAction (success!)"
+        (kind == Just (JSON.String "DisplayInfo") || kind == Just (JSON.String "GiveAction"))
+
+  , simpleTestCase "respects timeout parameter" $ do
+      stateRef <- loadedState
+      let tool = Types.AgdaAuto { Types.goalId = 0, Types.timeout = Just 1000, Types.format = Nothing }
+      response <- runTool stateRef tool
+
+      -- Should complete within timeout
+      let kind = getField "kind" response
+      assertBool "Should return DisplayInfo or GiveAction"
+        (kind == Just (JSON.String "DisplayInfo") || kind == Just (JSON.String "GiveAction"))
+  ]
+
+-- | Tests for agda_search_about
+searchAboutTests :: TestTree
+searchAboutTests = testGroup "agda_search_about"
+  [ simpleTestCase "searches for definitions by name" $ do
+      stateRef <- loadedState
+      let tool = Types.AgdaSearchAbout { Types.query = "suc", Types.format = Nothing }
+      response <- runTool stateRef tool
+
+      -- Should return DisplayInfo with SearchAbout info
+      let kind = getField "kind" response
+      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
+
+  , simpleTestCase "searches for definitions by pattern" $ do
+      stateRef <- loadedState
+      let tool = Types.AgdaSearchAbout { Types.query = "Nat", Types.format = Nothing }
+      response <- runTool stateRef tool
+
+      -- Should return results containing Nat-related definitions
+      let kind = getField "kind" response
+      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
+
+  , simpleTestCase "returns empty for non-existent names" $ do
+      stateRef <- loadedState
+      let tool = Types.AgdaSearchAbout { Types.query = "nonExistentFunction12345", Types.format = Nothing }
+      response <- runTool stateRef tool
+
+      -- Should still return DisplayInfo (just with no results)
+      let kind = getField "kind" response
+      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
+  ]
+
+showModuleTests :: TestTree
+showModuleTests = testGroup "agda_show_module"
+  [ simpleTestCase "shows builtin Nat module contents" $ do
+      stateRef <- loadedState
+      let tool = Types.AgdaShowModule { Types.moduleName = "Agda.Builtin.Nat", Types.format = Nothing }
+      response <- runTool stateRef tool
+
+      -- Should return DisplayInfo with module contents
+      let kind = getField "kind" response
+      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
+
+  , simpleTestCase "shows Data.Nat module contents" $ do
+      stateRef <- loadedState
+      let tool = Types.AgdaShowModule { Types.moduleName = "Data.Nat", Types.format = Nothing }
+      response <- runTool stateRef tool
+
+      -- Should return DisplayInfo with module contents
+      let kind = getField "kind" response
+      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
+
+  , simpleTestCase "handles non-existent module gracefully" $ do
+      stateRef <- loadedState
+      let tool = Types.AgdaShowModule { Types.moduleName = "NonExistent.Module", Types.format = Nothing }
+      response <- runTool stateRef tool
+
+      -- Should return an error or DisplayInfo response
+      let kind = getField "kind" response
+      assertBool "Should be DisplayInfo or error response"
+        (kind == Just (JSON.String "DisplayInfo") || kind == Just (JSON.String "Error"))
+  ]
+
 -- | Tests for agda_why_in_scope
 whyInScopeTests :: TestTree
 whyInScopeTests = testGroup "agda_why_in_scope"
@@ -332,6 +427,103 @@ whyInScopeTests = testGroup "agda_why_in_scope"
       let kind = getField "kind" response
       assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
   ]
+
+-- | Tests for agda_list_postulates
+listPostulatesTests :: TestTree
+listPostulatesTests = testGroup "agda_list_postulates"
+  [ simpleTestCase "lists postulates in Full format" $ do
+      stateRef <- initServerState
+      file <- postulateFile
+      let tool = Types.AgdaListPostulates { Types.file = T.pack file, Types.format = Nothing }
+      response <- runTool stateRef tool
+
+      -- Should return a JSON array of postulates
+      case response of
+        JSON.Array postulates -> do
+          assertEqual "Should have 5 postulates" 5 (V.length postulates)
+
+          -- Check first postulate has required fields
+          case postulates V.! 0 of
+            JSON.Object obj -> do
+              let pName = JSON.KeyMap.lookup (JSON.Key.fromText "pName") obj
+              let pType = JSON.KeyMap.lookup (JSON.Key.fromText "pType") obj
+              let pRange = JSON.KeyMap.lookup (JSON.Key.fromText "pRange") obj
+              assertBool "Should have pName field" (pName /= Nothing)
+              assertBool "Should have pType field" (pType /= Nothing)
+              assertBool "Should have pRange field" (pRange /= Nothing)
+            _ -> assertFailure "Postulate should be a JSON object"
+        _ -> assertFailure "Response should be a JSON array"
+
+  , simpleTestCase "lists postulates in Concise format" $ do
+      stateRef <- initServerState
+      file <- postulateFile
+      let tool = Types.AgdaListPostulates { Types.file = T.pack file, Types.format = Nothing }
+      response <- runToolConcise stateRef tool
+
+      -- Should return human-readable text like "5 postulates: ..."
+      assertBool "Should mention '5 postulates'" (T.isInfixOf "5 postulates" response)
+      assertBool "Should contain postulate names"
+        (T.isInfixOf "foo" response && T.isInfixOf "bar" response && T.isInfixOf "baz" response)
+      assertBool "Should mention line numbers" (T.isInfixOf "at lines" response)
+
+  , simpleTestCase "returns empty for file with no postulates" $ do
+      stateRef <- initServerState
+      file <- exampleFile
+      let tool = Types.AgdaListPostulates { Types.file = T.pack file, Types.format = Nothing }
+      response <- runTool stateRef tool
+
+      -- Should return empty array
+      case response of
+        JSON.Array postulates -> do
+          assertEqual "Should have 0 postulates" 0 (V.length postulates)
+        _ -> assertFailure "Response should be a JSON array"
+
+  , simpleTestCase "extracts correct postulate names" $ do
+      stateRef <- initServerState
+      file <- postulateFile
+      let tool = Types.AgdaListPostulates { Types.file = T.pack file, Types.format = Nothing }
+      response <- runTool stateRef tool
+
+      -- Check postulate names
+      case response of
+        JSON.Array postulates -> do
+          let names = map extractName (V.toList postulates)
+          assertBool "Should contain 'foo'" ("PostulateTest.foo" `elem` names)
+          assertBool "Should contain 'bar'" ("PostulateTest.bar" `elem` names)
+          assertBool "Should contain 'baz'" ("PostulateTest.baz" `elem` names)
+          assertBool "Should contain 'identity'" ("PostulateTest.identity" `elem` names)
+          assertBool "Should contain 'composition'" ("PostulateTest.composition" `elem` names)
+        _ -> assertFailure "Response should be a JSON array"
+
+  , simpleTestCase "provides correct types for postulates" $ do
+      stateRef <- initServerState
+      file <- postulateFile
+      let tool = Types.AgdaListPostulates { Types.file = T.pack file, Types.format = Nothing }
+      response <- runTool stateRef tool
+
+      -- Check that at least one postulate has its expected type
+      case response of
+        JSON.Array postulates -> do
+          let types = map extractType (V.toList postulates)
+          assertBool "Should have 'Nat' type" ("Nat" `elem` types)
+          assertBool "Should have 'Bool' type" ("Bool" `elem` types)
+          assertBool "Should have function type" (any (T.isInfixOf "→") types)
+        _ -> assertFailure "Response should be a JSON array"
+  ]
+  where
+    extractName :: JSON.Value -> Text
+    extractName (JSON.Object obj) =
+      case JSON.KeyMap.lookup (JSON.Key.fromText "pName") obj of
+        Just (JSON.String name) -> name
+        _ -> ""
+    extractName _ = ""
+
+    extractType :: JSON.Value -> Text
+    extractType (JSON.Object obj) =
+      case JSON.KeyMap.lookup (JSON.Key.fromText "pType") obj of
+        Just (JSON.String typ) -> typ
+        _ -> ""
+    extractType _ = ""
 
 -- | Helper to create a loaded state for tests
 loadedState :: IO (IORef ServerState)

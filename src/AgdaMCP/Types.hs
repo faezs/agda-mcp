@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# OPTIONS_GHC -Wno-partial-fields #-}
 
 module AgdaMCP.Types where
 
@@ -32,7 +33,11 @@ data AgdaTool
     | AgdaCompute { goalId :: Int, expression :: Text, format :: Maybe Text }
     | AgdaInferType { goalId :: Int, expression :: Text, format :: Maybe Text }
     | AgdaIntro { goalId :: Int, format :: Maybe Text }
+    | AgdaAuto { goalId :: Int, timeout :: Maybe Int, format :: Maybe Text }
+    | AgdaSearchAbout { query :: Text, format :: Maybe Text }
+    | AgdaShowModule { moduleName :: Text, format :: Maybe Text }
     | AgdaWhyInScope { name :: Text, format :: Maybe Text }
+    | AgdaListPostulates { file :: Text, format :: Maybe Text }
     deriving (Show, Eq)
 
 -- Resource definitions for exposing Agda file information
@@ -57,12 +62,19 @@ agdaToolDescriptions =
     , ("AgdaCompute", "Parse and display an expression in a goal's context")
     , ("AgdaInferType", "Infer the type of an expression in a goal's context")
     , ("AgdaIntro", "Introduce variables using the intro tactic (generates suggestions)")
+    , ("AgdaAuto", "Attempt automatic proof search to fill a goal (uses Agda's Auto/Agsy tactic)")
+    , ("AgdaSearchAbout", "Search for definitions by name or type signature (Hoogle-style search)")
+    , ("AgdaShowModule", "Show the contents of a module (all exported definitions, types, and submodules)")
     , ("AgdaWhyInScope", "Look up documentation and scope information for a name")
+    , ("AgdaListPostulates", "List all postulates in a file with their names, types, and positions. Useful for converting postulates to holes for implementation.")
     , ("file", "Path to the Agda file")
+    , ("moduleName", "Fully qualified module name (e.g., 'Data.Nat', 'Agda.Builtin.Nat')")
     , ("goalId", "The numeric ID of the goal/hole (starting from 0)")
     , ("expression", "Agda expression to use (e.g., 'zero', 'suc n', 'refl')")
     , ("variable", "Name of the variable to case-split on")
+    , ("query", "Search query: can be a name pattern or type signature to search for")
     , ("name", "Name to look up in scope")
+    , ("timeout", "Optional timeout in milliseconds for proof search (default: 5000)")
     , ("format", "Response format: \"Concise\" (default, human-readable, ~90% smaller) or \"Full\" (complete JSON with ranges for programmatic processing)")
     ]
 

@@ -1,6 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE LambdaCase #-}
+{-# OPTIONS_GHC -Wno-unused-top-binds #-}
+{-# OPTIONS_GHC -Wno-unused-record-wildcards #-}
 
 module AgdaMCP.Server
   ( ServerState(..)
@@ -17,14 +19,13 @@ import qualified Data.Text.IO as TIO
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
-import Data.Maybe (fromMaybe, isNothing)
 import Data.IORef
 import GHC.Generics (Generic)
-import Control.Monad (forM, when, void)
+import Control.Monad (forM)
 import Control.Monad.IO.Class (liftIO)
 import Control.Concurrent (forkIO, ThreadId)
 import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
-import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar, tryPutMVar)
+import Control.Concurrent.MVar (MVar, newEmptyMVar, takeMVar, tryPutMVar)
 import System.FilePath (takeDirectory)
 
 -- MCP Server library
@@ -35,30 +36,27 @@ import qualified AgdaMCP.Repl as Repl
 -- Agda imports - using the actual interaction functions
 import Agda.Interaction.Base
 import Agda.Interaction.BasicOps as BasicOps
-import Agda.Interaction.InteractionTop (cmd_load')
 import Agda.Interaction.MakeCase (makeCase)
 import Agda.Interaction.Imports (CheckResult, crInterface, Mode(..), parseSource, typeCheckMain)
 import Agda.Interaction.Options (defaultOptions)
 import Agda.Interaction.Output (OutputConstraint)
 import Agda.Interaction.Response
-import Agda.Interaction.Response.Base
 import Agda.Interaction.JSON (EncodeTCM(..), encodeTCM)
 import Agda.Interaction.JSONTop () -- Import JSON instances
 
 import Agda.Syntax.Common
-import Agda.Syntax.Common.Pretty (render, pretty, prettyShow)
+import Agda.Syntax.Common.Pretty (render, prettyShow)
 import Agda.Syntax.Position (Range, rStart, rEnd, posLine, posCol, noRange)
 import Agda.Syntax.Scope.Base (WhyInScopeData(..))
 import Agda.Syntax.Abstract (Expr)
+import Agda.Syntax.Abstract.Name (QName(..), nameBindingSite, qnameName)
 
 import Agda.TypeChecking.Monad
-import Agda.TypeChecking.Monad.Base (iInsideScope, SourceFile(..), genericError)
-import Agda.TypeChecking.Monad.MetaVars (getInteractionPoints, getInteractionRange, withInteractionId)
-import Agda.TypeChecking.Monad.Options (setCommandLineOptions')
 import Agda.TypeChecking.Pretty (prettyTCM, prettyA)
 
-import Agda.Utils.FileName (absolute, AbsolutePath, filePath)
-import Agda.Utils.FileId (FileId(..), idFromFile)
+import Agda.Utils.FileName (absolute, filePath)
+import qualified Data.HashMap.Strict as HashMap
+import Data.Maybe (catMaybes)
 
 -- Data structures for MCP communication
 data AgdaGoal = AgdaGoal
@@ -78,6 +76,15 @@ data AgdaContextEntry = AgdaContextEntry
 
 instance JSON.ToJSON AgdaContextEntry
 instance JSON.FromJSON AgdaContextEntry
+
+data PostulateInfo = PostulateInfo
+  { pName :: Text
+  , pType :: Text
+  , pRange :: (Int, Int, Int, Int)
+  } deriving (Generic, Show)
+
+instance JSON.ToJSON PostulateInfo
+instance JSON.FromJSON PostulateInfo
 
 data AgdaResult = AgdaResult
   { success :: Bool
@@ -180,14 +187,24 @@ toolToIOTCM currentFilePath tool =
       IOTCM currentFilePath None Direct (Cmd_refine (InteractionId goalId) noRange (T.unpack expression))
     AgdaMCP.Types.AgdaCaseSplit{goalId, variable} ->
       IOTCM currentFilePath None Direct (Cmd_make_case (InteractionId goalId) noRange (T.unpack variable))
-    AgdaMCP.Types.AgdaCompute{goalId, expression} ->
+    AgdaMCP.Types.AgdaCompute{expression} ->
       IOTCM currentFilePath None Direct (Cmd_compute_toplevel DefaultCompute (T.unpack expression))
-    AgdaMCP.Types.AgdaInferType{goalId, expression} ->
+    AgdaMCP.Types.AgdaInferType{expression} ->
       IOTCM currentFilePath None Direct (Cmd_infer_toplevel Simplified (T.unpack expression))
     AgdaMCP.Types.AgdaIntro{goalId} ->
       IOTCM currentFilePath None Direct (Cmd_intro False (InteractionId goalId) noRange "")
+    AgdaMCP.Types.AgdaAuto{goalId} ->
+      IOTCM currentFilePath None Direct (Cmd_autoOne Simplified (InteractionId goalId) noRange "")
+    AgdaMCP.Types.AgdaSearchAbout{query} ->
+      IOTCM currentFilePath None Direct (Cmd_search_about_toplevel Simplified (T.unpack query))
+    AgdaMCP.Types.AgdaShowModule{moduleName} ->
+      IOTCM currentFilePath None Direct (Cmd_show_module_contents_toplevel Simplified (T.unpack moduleName))
     AgdaMCP.Types.AgdaWhyInScope{name} ->
       IOTCM currentFilePath None Direct (Cmd_why_in_scope_toplevel (T.unpack name))
+    AgdaMCP.Types.AgdaListPostulates{file} ->
+      -- This case should never be reached as AgdaListPostulates is handled separately in handleAgdaTool
+      -- We include it here for pattern match exhaustiveness
+      IOTCM (T.unpack file) None Direct (Cmd_load (T.unpack file) [])
 
 -- ============================================================================
 -- STDIN-based Server (for testing/development)
@@ -318,6 +335,44 @@ mcpLoadFile stateRef file = do
   liftIO $ writeIORef stateRef (state { currentFile = Just absPath, checkResult = Just checked })
   pure $ AgdaResult True "File loaded successfully" Nothing
 
+mcpListPostulates :: IORef ServerState -> FilePath -> TCM AgdaResult
+mcpListPostulates stateRef filepath = do
+  -- First load the file (similar to mcpLoadFile)
+  absPath <- liftIO $ absolute filepath
+  fileDir <- liftIO $ absolute $ takeDirectory filepath
+  setCommandLineOptions' fileDir defaultOptions
+  fileId <- idFromFile absPath
+  let sourceFile = SourceFile fileId
+  source <- parseSource sourceFile
+  checked <- typeCheckMain TypeCheck source
+  setScope $ iInsideScope $ crInterface checked
+
+  -- Update state
+  state <- liftIO $ readIORef stateRef
+  liftIO $ writeIORef stateRef (state { currentFile = Just absPath, checkResult = Just checked })
+
+  -- Get all definitions from the interface's signature (not global signature)
+  let sig = iSignature (crInterface checked)
+  let allDefs = HashMap.toList (_sigDefinitions sig)
+
+  -- Filter for axioms (postulates) and extract information
+  postulates <- catMaybes <$> forM allDefs (\(qname, def) -> do
+    case theDef def of
+      Axiom{} -> do
+        -- Get type as text
+        typ <- prettyTCM (defType def)
+        -- Get the name range (position in file)
+        let nameRange = nameBindingSite (qnameName qname)
+        return $ Just PostulateInfo
+          { pName = T.pack $ prettyShow qname
+          , pType = T.pack $ render typ
+          , pRange = rangeToTuple nameRange
+          }
+      _ -> return Nothing
+    )
+
+  pure $ AgdaResult True "Success" (Just $ JSON.toJSON postulates)
+
 mcpGetGoals :: IORef ServerState -> TCM AgdaResult
 mcpGetGoals stateRef = do
   ensureFileLoaded stateRef
@@ -327,7 +382,7 @@ mcpGetGoals stateRef = do
     constraint <- BasicOps.typeOfMeta AsIs iid
     goalTypeText <- renderConstraintType constraint
     return $ AgdaGoal
-      { goalId = fromIntegral ((\(InteractionId n) -> n) iid)
+      { goalId = (\(InteractionId n) -> n) iid
       , goalType = goalTypeText
       , goalRange = rangeToTuple range
       }
@@ -441,7 +496,7 @@ renderConstraintType constraint = do
   return $ T.pack $ render doc
 
 renderConstraintContext :: OutputConstraint Expr InteractionId -> TCM [AgdaContextEntry]
-renderConstraintContext constraint = do
+renderConstraintContext _constraint = do
   -- For now, return empty context - we'll need to dig into the constraint structure
   -- to extract context entries. This would require pattern matching on the OutputConstraint
   -- which contains the context information.
@@ -478,40 +533,55 @@ initServerState = do
 -- This will be called by the mcp-server library when a tool is invoked
 handleAgdaTool :: IORef ServerState -> AgdaMCP.Types.AgdaTool -> IO MCP.Server.Content
 handleAgdaTool stateRef tool = do
-  state <- readIORef stateRef
-
-  -- Get current file path for IOTCM commands
-  let currentFilePath = case currentFile state of
-        Just absPath -> filePath absPath
-        Nothing -> ""
-
-  -- Convert tool to IOTCM command
-  let iotcm = toolToIOTCM currentFilePath tool
-
-  -- Create response MVar and command wrapper
-  responseVar <- newEmptyMVar
-  let cmd = CommandWithResponse iotcm responseVar
-
-  -- Send command to persistent REPL
-  writeChan (commandChan state) cmd
-  putStrLn $ "Sent command to REPL: " ++ show tool
-
-  -- Wait for encoded JSON response from REPL
-  jsonValue <- takeMVar responseVar
-  putStrLn "Received encoded response from REPL"
-
-  -- If this was a successful load, update the current file in state
+  -- Special handling for AgdaListPostulates (doesn't use REPL)
   case tool of
-    AgdaMCP.Types.AgdaLoad{file} -> do
-      absPath <- absolute (T.unpack file)
-      modifyIORef stateRef (\s -> s { currentFile = Just absPath })
-      putStrLn $ "Updated current file to: " ++ T.unpack file
-    _ -> return ()
+    AgdaMCP.Types.AgdaListPostulates{file} -> do
+      -- Run directly in TCM (not through REPL)
+      result <- runTCMTop $ mcpListPostulates stateRef (T.unpack file)
+      case result of
+        Left err -> pure $ MCP.Server.ContentText $ "Error: " <> T.pack (show err)
+        Right (AgdaResult _ _ (Just val)) -> do
+          let responseFormat = Format.getFormat tool
+          let responseText = Format.formatResponse responseFormat val
+          pure $ MCP.Server.ContentText responseText
+        Right _ -> pure $ MCP.Server.ContentText "No postulates found"
 
-  -- Format response based on requested format (default: Concise)
-  let responseFormat = Format.getFormat tool
-  let responseText = Format.formatResponse responseFormat jsonValue
-  pure $ MCP.Server.ContentText responseText
+    -- All other tools go through REPL
+    _ -> do
+      state <- readIORef stateRef
+
+      -- Get current file path for IOTCM commands
+      let currentFilePath = case currentFile state of
+            Just absPath -> filePath absPath
+            Nothing -> ""
+
+      -- Convert tool to IOTCM command
+      let iotcm = toolToIOTCM currentFilePath tool
+
+      -- Create response MVar and command wrapper
+      responseVar <- newEmptyMVar
+      let cmd = CommandWithResponse iotcm responseVar
+
+      -- Send command to persistent REPL
+      writeChan (commandChan state) cmd
+      putStrLn $ "Sent command to REPL: " ++ show tool
+
+      -- Wait for encoded JSON response from REPL
+      jsonValue <- takeMVar responseVar
+      putStrLn "Received encoded response from REPL"
+
+      -- If this was a successful load, update the current file in state
+      case tool of
+        AgdaMCP.Types.AgdaLoad{file} -> do
+          absPath <- absolute (T.unpack file)
+          modifyIORef stateRef (\s -> s { currentFile = Just absPath })
+          putStrLn $ "Updated current file to: " ++ T.unpack file
+        _ -> return ()
+
+      -- Format response based on requested format (default: Concise)
+      let responseFormat = Format.getFormat tool
+      let responseText = Format.formatResponse responseFormat jsonValue
+      pure $ MCP.Server.ContentText responseText
 
 -- MCP Resource Handler - exposes Agda file information as resources
 -- Resources extract parameters from the URI path
