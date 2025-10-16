@@ -1,0 +1,73 @@
+# Cabal build artifacts
+dist/
+dist-newstyle/
+cabal-dev/
+.cabal-sandbox/
+cabal.sandbox.config
+cabal.config
+cabal.project.local
+cabal.project.local~
+
+# Stack build artifacts
+.stack-work/
+stack.yaml.lock
+
+# Haskell artifacts
+*.hi
+*.o
+*.dyn_hi
+*.dyn_o
+*.chi
+*.chs.h
+.virtualenv
+.hsenv
+.hpc
+.cabal-sandbox/
+
+# Agda artifacts
+*.agdai
+_build/
+MAlonzo/**
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+\#*\#
+.#*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.bak
+*.bak2
+*.bak3
+*.backup
+*.orig
+*.tmp
+
+# Test artifacts
+.tasty-rerun-log
+
+# GHC
+.ghc.environment.*
+
+# Nix
+result
+result-*
+
+# Python (if using Python tooling)
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+env/
+ENV/
+
+# Logs
+*.log
