@@ -40,6 +40,8 @@ data AgdaTool
     | AgdaSolveOne { goalId :: Int, format :: Maybe Text }
     | AgdaHelperFunction { goalId :: Int, helperName :: Text, format :: Maybe Text }
     | AgdaGoalTypeContext { goalId :: Int, format :: Maybe Text }
+    | AgdaGoalAtPosition { file :: Text, line :: Int, column :: Int, format :: Maybe Text }
+    | AgdaGotoDefinition { file :: Text, line :: Int, column :: Int, format :: Maybe Text }
     | AgdaSearchAbout { query :: Text, format :: Maybe Text }
     | AgdaShowModule { moduleName :: Text, format :: Maybe Text }
     | AgdaShowConstraints { format :: Maybe Text }
@@ -76,6 +78,8 @@ agdaToolDescriptions =
     , ("AgdaSolveOne", "Attempt to solve a specific goal using Agda's constraint solver")
     , ("AgdaHelperFunction", "Generate a helper function skeleton for a goal (useful for refactoring)")
     , ("AgdaGoalTypeContext", "Get both the goal type and context together (more efficient than separate calls)")
+    , ("AgdaGoalAtPosition", "Find which goal exists at a specific file position (line and column)")
+    , ("AgdaGotoDefinition", "Navigate to the definition of a symbol at a specific position (like agda2-mode's M-. / goto-definition)")
     , ("AgdaSearchAbout", "Search for definitions by name or type signature (Hoogle-style search)")
     , ("AgdaShowModule", "Show the contents of a module (all exported definitions, types, and submodules)")
     , ("AgdaShowConstraints", "Show all unsolved type-checking constraints in the current file")
@@ -89,6 +93,8 @@ agdaToolDescriptions =
     , ("query", "Search query: can be a name pattern or type signature to search for")
     , ("name", "Name to look up in scope")
     , ("helperName", "Suggested name for the generated helper function")
+    , ("line", "Line number in the file (1-indexed)")
+    , ("column", "Column number in the line (1-indexed)")
     , ("timeout", "Optional timeout in milliseconds for proof search (default: 5000)")
     , ("format", "Response format: \"Concise\" (default, human-readable, ~90% smaller) or \"Full\" (complete JSON with ranges for programmatic processing)")
     ]

@@ -72,3 +72,4 @@ test-suite agda-mcp-tests
   default-extensions:
     OverloadedStrings
   ghc-options: -Wall -threaded -rtsopts -with-rtsopts=-N
+  x-set-environment: AGDA_DIR=/Users/faezs/homotopy-nn

@@ -94,6 +94,7 @@ setFormat tool fmt = case tool of
   Types.AgdaSolveOne{Types.goalId=gid} -> Types.AgdaSolveOne{Types.goalId=gid, Types.format=fmt}
   Types.AgdaHelperFunction{Types.goalId=gid, Types.helperName=name} -> Types.AgdaHelperFunction{Types.goalId=gid, Types.helperName=name, Types.format=fmt}
   Types.AgdaGoalTypeContext{Types.goalId=gid} -> Types.AgdaGoalTypeContext{Types.goalId=gid, Types.format=fmt}
+  Types.AgdaGoalAtPosition{Types.file=f, Types.line=l, Types.column=c} -> Types.AgdaGoalAtPosition{Types.file=f, Types.line=l, Types.column=c, Types.format=fmt}
   Types.AgdaSearchAbout{Types.query=q} -> Types.AgdaSearchAbout{Types.query=q, Types.format=fmt}
   Types.AgdaShowModule{Types.moduleName=m} -> Types.AgdaShowModule{Types.moduleName=m, Types.format=fmt}
   Types.AgdaShowConstraints{} -> Types.AgdaShowConstraints{Types.format=fmt}
@@ -124,6 +125,7 @@ tests = testGroup "AgdaMCP.Server Tests"
   , solveOneTests
   , helperFunctionTests
   , goalTypeContextTests
+  , goalAtPositionTests
   , searchAboutTests
   , showModuleTests
   , showConstraintsTests
@@ -141,6 +143,11 @@ postulateFile :: IO FilePath
 postulateFile = do
   cwd <- getCurrentDirectory
   pure $ cwd </> "test" </> "PostulateTest.agda"
+
+searchTestFile :: IO FilePath
+searchTestFile = do
+  cwd <- getCurrentDirectory
+  pure $ cwd </> "test" </> "SearchTest.agda"
 
 -- | Tests for agda_load
 loadTests :: TestTree
@@ -462,32 +469,156 @@ goalTypeContextTests = testGroup "agda_goal_type_context"
 -- | Tests for agda_search_about
 searchAboutTests :: TestTree
 searchAboutTests = testGroup "agda_search_about"
-  [ simpleTestCase "searches for definitions by name" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaSearchAbout { Types.query = "suc", Types.format = Nothing }
-      response <- runTool stateRef tool
+  [ testGroup "Basic functionality with SearchTest.agda"
+      [ simpleTestCase "finds functions with Type in signature" $ do
+          stateRef <- initServerState
+          file <- searchTestFile
+          _ <- handleAgdaTool stateRef (Types.AgdaLoad { Types.file = T.pack file, Types.format = Nothing })
 
-      -- Should return DisplayInfo with SearchAbout info
-      let kind = getField "kind" response
-      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
+          response <- runTool stateRef (Types.AgdaSearchAbout { Types.query = "Type", Types.format = Just "Full" })
 
-  , simpleTestCase "searches for definitions by pattern" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaSearchAbout { Types.query = "Nat", Types.format = Nothing }
-      response <- runTool stateRef tool
+          let info = getField "info" response
+          let results = case info of
+                Just (JSON.Object obj) -> JSON.KeyMap.lookup (JSON.Key.fromText "results") obj
+                _ -> Nothing
 
-      -- Should return results containing Nat-related definitions
-      let kind = getField "kind" response
-      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
+          case results of
+            Just (JSON.Array arr) -> do
+              -- Should find example-id, example-const, example-compose, etc.
+              let count = V.length arr
+              assertBool "Should find multiple Type-mentioning functions" (count >= 3)
 
-  , simpleTestCase "returns empty for non-existent names" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaSearchAbout { Types.query = "nonExistentFunction12345", Types.format = Nothing }
-      response <- runTool stateRef tool
+              -- Check specific result structure
+              if count > 0 then do
+                let firstResult = arr V.! 0
+                assertBool "Result should have 'name' field"
+                  (getField "name" firstResult /= Nothing)
+                assertBool "Result should have 'type' field"
+                  (getField "type" firstResult /= Nothing)
+              else
+                pure ()
+            _ -> assertFailure "Expected results array"
 
-      -- Should still return DisplayInfo (just with no results)
-      let kind = getField "kind" response
-      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
+      , simpleTestCase "finds Path-related functions" $ do
+          stateRef <- initServerState
+          file <- searchTestFile
+          _ <- handleAgdaTool stateRef (Types.AgdaLoad { Types.file = T.pack file, Types.format = Nothing })
+
+          response <- runTool stateRef (Types.AgdaSearchAbout { Types.query = "Path", Types.format = Just "Full" })
+
+          -- Should find example-refl, example-sym (both have Path/≡ in type)
+          let info = getField "info" response
+          let results = case info of
+                Just (JSON.Object obj) -> JSON.KeyMap.lookup (JSON.Key.fromText "results") obj
+                _ -> Nothing
+
+          case results of
+            Just (JSON.Array arr) ->
+              assertBool "Should find Path-related functions" (V.length arr >= 1)
+            _ -> assertFailure "Expected results array"
+
+      , simpleTestCase "finds sum type constructors" $ do
+          stateRef <- initServerState
+          file <- searchTestFile
+          _ <- handleAgdaTool stateRef (Types.AgdaLoad { Types.file = T.pack file, Types.format = Nothing })
+
+          response <- runTool stateRef (Types.AgdaSearchAbout { Types.query = "⊎", Types.format = Just "Full" })
+
+          -- Should find example-inl, example-inr
+          let info = getField "info" response
+          let results = case info of
+                Just (JSON.Object obj) -> JSON.KeyMap.lookup (JSON.Key.fromText "results") obj
+                _ -> Nothing
+
+          case results of
+            Just (JSON.Array arr) ->
+              assertBool "Should find sum type functions" (V.length arr >= 2)
+            _ -> assertFailure "Expected results array"
+      ]
+
+  , testGroup "Concise format"
+      [ simpleTestCase "formats results concisely" $ do
+          stateRef <- initServerState
+          file <- searchTestFile
+          _ <- handleAgdaTool stateRef (Types.AgdaLoad { Types.file = T.pack file, Types.format = Nothing })
+
+          concise <- runToolConcise stateRef (Types.AgdaSearchAbout { Types.query = "Type", Types.format = Nothing })
+
+          -- Should show "N results:\n  name : type\n  ..."
+          assertBool "Should mention results" (T.isInfixOf "result" concise || T.isInfixOf "Result" concise)
+
+      , simpleTestCase "shows 'No results found' for non-existent" $ do
+          stateRef <- initServerState
+          file <- searchTestFile
+          _ <- handleAgdaTool stateRef (Types.AgdaLoad { Types.file = T.pack file, Types.format = Nothing })
+
+          concise <- runToolConcise stateRef (Types.AgdaSearchAbout { Types.query = "NonExistent12345", Types.format = Nothing })
+
+          assertEqual "Should say no results" "No results found" concise
+      ]
+
+  , testGroup "Edge cases"
+      [ simpleTestCase "case-sensitive search" $ do
+          stateRef <- initServerState
+          file <- searchTestFile
+          _ <- handleAgdaTool stateRef (Types.AgdaLoad { Types.file = T.pack file, Types.format = Nothing })
+
+          -- Search for lowercase vs uppercase
+          response1 <- runTool stateRef (Types.AgdaSearchAbout { Types.query = "type", Types.format = Just "Full" })
+          response2 <- runTool stateRef (Types.AgdaSearchAbout { Types.query = "Type", Types.format = Just "Full" })
+
+          -- Both should return valid responses
+          assertBool "Response1 should exist" (getField "info" response1 /= Nothing)
+          assertBool "Response2 should exist" (getField "info" response2 /= Nothing)
+      ]
+
+  , testGroup "homotopy-nn integration"
+      [ simpleTestCase "searches in Neural.Smooth.Calculus" $ do
+          stateRef <- initServerState
+          let calcFile = "/Users/faezs/homotopy-nn/src/Neural/Smooth/Calculus.agda"
+
+          _ <- handleAgdaTool stateRef (Types.AgdaLoad { Types.file = T.pack calcFile, Types.format = Nothing })
+          response <- runTool stateRef (Types.AgdaSearchAbout { Types.query = "ℝ", Types.format = Just "Full" })
+
+          let info = getField "info" response
+          let results = case info of
+                Just (JSON.Object obj) -> JSON.KeyMap.lookup (JSON.Key.fromText "results") obj
+                _ -> Nothing
+
+          case results of
+            Just (JSON.Array arr) -> do
+              -- Should find functions mentioning ℝ (the real numbers type)
+              assertBool "Should find functions with ℝ in type" (V.length arr >= 1)
+
+              -- Verify result structure
+              if V.length arr > 0 then do
+                let firstResult = arr V.! 0
+                assertBool "Result should have 'name' field"
+                  (getField "name" firstResult /= Nothing)
+                assertBool "Result should have 'type' field"
+                  (getField "type" firstResult /= Nothing)
+              else
+                pure ()
+            _ -> assertFailure "Expected results array"
+
+      , simpleTestCase "searches for smooth functions" $ do
+          stateRef <- initServerState
+          let calcFile = "/Users/faezs/homotopy-nn/src/Neural/Smooth/Calculus.agda"
+
+          _ <- handleAgdaTool stateRef (Types.AgdaLoad { Types.file = T.pack calcFile, Types.format = Nothing })
+          response <- runTool stateRef (Types.AgdaSearchAbout { Types.query = "Smooth", Types.format = Just "Full" })
+
+          let info = getField "info" response
+          let results = case info of
+                Just (JSON.Object obj) -> JSON.KeyMap.lookup (JSON.Key.fromText "results") obj
+                _ -> Nothing
+
+          case results of
+            Just (JSON.Array arr) ->
+              -- Should find smooth-related definitions
+              assertBool "Should find Smooth-related functions" (V.length arr >= 1)
+            _ -> assertFailure "Expected results array"
+      ]
   ]
 
 showModuleTests :: TestTree
@@ -658,6 +789,46 @@ listPostulatesTests = testGroup "agda_list_postulates"
         Just (JSON.String typ) -> typ
         _ -> ""
     extractType _ = ""
+
+-- | Tests for agda_goal_at_position
+goalAtPositionTests :: TestTree
+goalAtPositionTests = testGroup "agda_goal_at_position"
+  [ simpleTestCase "finds goal at position" $ do
+      stateRef <- initServerState
+      file <- exampleFile
+      -- Line 10, column 13 is inside the first goal {! !}
+      let tool = Types.AgdaGoalAtPosition { Types.file = T.pack file, Types.line = 10, Types.column = 13, Types.format = Nothing }
+      response <- runTool stateRef tool
+
+      -- Check that we got a goal back with goalId field
+      let goalId = getField "goalId" response
+      assertBool "Should have goalId field" (goalId /= Nothing)
+
+      let goalType = getField "goalType" response
+      assertBool "Should have goalType field" (goalType /= Nothing)
+
+  , simpleTestCase "returns error when no goal at position" $ do
+      stateRef <- initServerState
+      file <- exampleFile
+      -- Line 1, column 1 is not inside any goal
+      let tool = Types.AgdaGoalAtPosition { Types.file = T.pack file, Types.line = 1, Types.column = 1, Types.format = Nothing }
+      result <- handleAgdaTool stateRef tool
+
+      case result of
+        MCP.ContentText txt -> assertBool "Should mention no goal found" (T.isInfixOf "No goal found" txt)
+        _ -> assertFailure "Expected ContentText response"
+
+  , simpleTestCase "formats concisely" $ do
+      stateRef <- initServerState
+      file <- exampleFile
+      -- Line 10, column 13 is inside the first goal
+      let tool = Types.AgdaGoalAtPosition { Types.file = T.pack file, Types.line = 10, Types.column = 13, Types.format = Nothing }
+      response <- runToolConcise stateRef tool
+
+      -- Concise format should show goal like "?<0> : Nat (10:12)"
+      assertBool "Should contain goal marker" (T.isInfixOf "?" response)
+      assertBool "Should contain type separator" (T.isInfixOf ":" response)
+  ]
 
 -- | Helper to create a loaded state for tests
 loadedState :: IO (IORef ServerState)

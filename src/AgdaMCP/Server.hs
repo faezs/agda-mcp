@@ -12,18 +12,22 @@ module AgdaMCP.Server
   ) where
 
 import qualified Data.Aeson as JSON
+import qualified Data.Aeson.Key as JSON.Key
 import qualified AgdaMCP.Format as Format
 import qualified Data.Aeson.KeyMap as KM
+import qualified Data.Aeson.KeyMap as JSON.KeyMap
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.Vector as V
 import Data.Text (Text)
 import Data.IORef
 import GHC.Generics (Generic)
 import Control.Monad (forM)
 import Control.Monad.IO.Class (liftIO)
-import Control.Concurrent (forkIO, ThreadId)
+import Control.Monad.Except (catchError)
+import Control.Concurrent (forkIO, ThreadId, threadDelay)
 import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, takeMVar, tryPutMVar)
 import System.FilePath (takeDirectory)
@@ -52,6 +56,7 @@ import Agda.Syntax.Abstract (Expr)
 import Agda.Syntax.Abstract.Name (QName(..), nameBindingSite, qnameName)
 
 import Agda.TypeChecking.Monad
+import Agda.TypeChecking.Monad.Options (getAgdaLibFilesWithoutTopLevelModuleName, setLibraryIncludes)
 import Agda.TypeChecking.Pretty (prettyTCM, prettyA)
 
 import Agda.Utils.FileName (absolute, filePath)
@@ -101,10 +106,11 @@ data CommandWithResponse = CommandWithResponse
   , cmdResponseVar :: MVar JSON.Value  -- Store encoded JSON, not raw Response
   }
 
--- Server state - tracks current file, check result, and persistent REPL
+-- Server state - tracks current file, check result, highlighting info, and persistent REPL
 data ServerState = ServerState
   { currentFile :: Maybe AbsolutePath
   , checkResult :: Maybe CheckResult
+  , highlightingInfo :: Maybe JSON.Value     -- Cached highlighting info for goto-def/find-refs
   , commandChan :: Chan CommandWithResponse  -- Channel to send commands to REPL
   , replThreadId :: Maybe ThreadId           -- Background REPL thread
   , currentResponseVar :: IORef (Maybe (MVar JSON.Value))  -- Current response MVar for encoded JSON
@@ -125,8 +131,8 @@ readCommandFromChan responseVarRef chan = do
 -- | Callback for capturing Agda responses and routing to waiting handlers
 -- Pattern match on specific response types we care about
 -- Encode responses in the TCM context before routing
-mcpCallback :: IORef (Maybe (MVar JSON.Value)) -> Response -> TCM ()
-mcpCallback responseVarRef resp = do
+mcpCallback :: IORef ServerState -> IORef (Maybe (MVar JSON.Value)) -> Response -> TCM ()
+mcpCallback stateRef responseVarRef resp = do
   let isContentResponse = case resp of
         Resp_InteractionPoints _ -> True
         Resp_DisplayInfo _ -> True
@@ -135,7 +141,7 @@ mcpCallback responseVarRef resp = do
         Resp_SolveAll _ -> True
         Resp_JumpToError _ _ -> True
         Resp_Status _ -> False
-        Resp_HighlightingInfo _ _ _ _ -> False
+        Resp_HighlightingInfo _ _ _ _ -> True  -- Now capturing highlighting info
         Resp_RunningInfo _ _ -> False
         Resp_ClearRunningInfo -> False
         Resp_ClearHighlighting _ -> False
@@ -147,18 +153,29 @@ mcpCallback responseVarRef resp = do
     then do
       -- Encode response in the current TCM context
       jsonValue <- encodeTCM resp
-      maybeVar <- liftIO $ readIORef responseVarRef
-      case maybeVar of
-        Just responseVar -> liftIO $ do
-          success <- tryPutMVar responseVar jsonValue
-          if success
-            then do
-              putStrLn "Agda response encoded and routed to handler"
-              writeIORef responseVarRef Nothing
-            else
-              putStrLn "Agda response ignored (handler already has response)"
-        Nothing -> liftIO $
-          putStrLn "Warning: Received response with no waiting handler"
+
+      -- Special handling for highlighting info - store in state instead of routing
+      case resp of
+        Resp_HighlightingInfo _ _ _ _ -> liftIO $ do
+          -- Debug: Log first 3000 chars of highlighting JSON
+          let jsonText = TE.decodeUtf8 $ LBS.toStrict $ JSON.encode jsonValue
+          putStrLn $ "Highlighting JSON (first 3000 chars): " ++ take 3000 (T.unpack jsonText)
+          modifyIORef stateRef (\s -> s { highlightingInfo = Just jsonValue })
+          putStrLn "Highlighting info captured and stored in state"
+        _ -> do
+          -- Route to waiting handler for other content responses
+          maybeVar <- liftIO $ readIORef responseVarRef
+          case maybeVar of
+            Just responseVar -> liftIO $ do
+              success <- tryPutMVar responseVar jsonValue
+              if success
+                then do
+                  putStrLn "Agda response encoded and routed to handler"
+                  writeIORef responseVarRef Nothing
+                else
+                  putStrLn "Agda response ignored (handler already has response)"
+            Nothing -> liftIO $
+              putStrLn "Warning: Received response with no waiting handler"
     else liftIO $
       putStrLn "Agda non-content response (skipped)"
 
@@ -209,6 +226,12 @@ toolToIOTCM currentFilePath tool =
       IOTCM currentFilePath None Direct (Cmd_helper_function Simplified (InteractionId goalId) noRange (T.unpack helperName))
     AgdaMCP.Types.AgdaGoalTypeContext{goalId} ->
       IOTCM currentFilePath None Direct (Cmd_goal_type_context Simplified (InteractionId goalId) noRange "")
+    AgdaMCP.Types.AgdaGoalAtPosition{file} ->
+      -- This case should never be reached as AgdaGoalAtPosition is handled separately in handleAgdaTool
+      IOTCM (T.unpack file) None Direct (Cmd_load (T.unpack file) [])
+    AgdaMCP.Types.AgdaGotoDefinition{file} ->
+      -- This case should never be reached as AgdaGotoDefinition is handled separately in handleAgdaTool
+      IOTCM (T.unpack file) None Direct (Cmd_load (T.unpack file) [])
     AgdaMCP.Types.AgdaSearchAbout{query} ->
       IOTCM currentFilePath None Direct (Cmd_search_about_toplevel Simplified (T.unpack query))
     AgdaMCP.Types.AgdaShowModule{moduleName} ->
@@ -333,13 +356,55 @@ ensureFileLoaded stateRef = do
       -- No file loaded yet
       genericError "No file loaded. Use agda_load first."
 
+-- Helper function to load a file with caching
+-- If the file is already loaded in state, reuse the cached CheckResult
+-- Otherwise, parse and type-check the file
+loadFileWithCache :: IORef ServerState -> FilePath -> TCM CheckResult
+loadFileWithCache stateRef filepath = do
+  absPath <- liftIO $ absolute filepath
+  state <- liftIO $ readIORef stateRef
+
+  -- Check if this file is already loaded
+  case (currentFile state, checkResult state) of
+    (Just cachedPath, Just cached) | cachedPath == absPath -> do
+      liftIO $ putStrLn $ "Using cached result for: " ++ filepath
+      setScope $ iInsideScope $ crInterface cached
+      return cached
+    _ -> do
+      -- Not cached or different file - load it fresh
+      liftIO $ putStrLn $ "Loading file fresh: " ++ filepath
+      fileDir <- liftIO $ absolute $ takeDirectory filepath
+
+      -- Discover and load .agda-lib files for this file's project
+      _ <- getAgdaLibFilesWithoutTopLevelModuleName absPath
+
+      -- Set up library includes (adds library paths to options)
+      optsWithLibs <- setLibraryIncludes defaultOptions
+      setCommandLineOptions' fileDir optsWithLibs
+
+      fileId <- idFromFile absPath
+      let sourceFile = SourceFile fileId
+      source <- parseSource sourceFile
+      checked <- typeCheckMain TypeCheck source
+      setScope $ iInsideScope $ crInterface checked
+
+      -- Update state with new load
+      liftIO $ writeIORef stateRef (state { currentFile = Just absPath, checkResult = Just checked })
+      return checked
+
 mcpLoadFile :: IORef ServerState -> FilePath -> TCM AgdaResult
 mcpLoadFile stateRef file = do
   absPath <- liftIO $ absolute file
   -- Get the directory containing the file for options initialization
   fileDir <- liftIO $ absolute $ takeDirectory file
-  -- Initialize options with the file's directory as root
-  setCommandLineOptions' fileDir defaultOptions
+
+  -- Discover and load .agda-lib files for this file's project
+  _ <- getAgdaLibFilesWithoutTopLevelModuleName absPath
+
+  -- Set up library includes (adds library paths to options)
+  optsWithLibs <- setLibraryIncludes defaultOptions
+  setCommandLineOptions' fileDir optsWithLibs
+
   -- Properly register the file and get its FileId
   fileId <- idFromFile absPath
   let sourceFile = SourceFile fileId
@@ -353,41 +418,166 @@ mcpLoadFile stateRef file = do
 
 mcpListPostulates :: IORef ServerState -> FilePath -> TCM AgdaResult
 mcpListPostulates stateRef filepath = do
-  -- First load the file (similar to mcpLoadFile)
-  absPath <- liftIO $ absolute filepath
-  fileDir <- liftIO $ absolute $ takeDirectory filepath
-  setCommandLineOptions' fileDir defaultOptions
-  fileId <- idFromFile absPath
-  let sourceFile = SourceFile fileId
-  source <- parseSource sourceFile
-  checked <- typeCheckMain TypeCheck source
-  setScope $ iInsideScope $ crInterface checked
+  -- Wrap in error handler to provide simplified error messages
+  catchError
+    (do
+      -- Use cached load if available
+      checked <- loadFileWithCache stateRef filepath
 
-  -- Update state
-  state <- liftIO $ readIORef stateRef
-  liftIO $ writeIORef stateRef (state { currentFile = Just absPath, checkResult = Just checked })
+      -- Get all definitions from the interface's signature (not global signature)
+      let sig = iSignature (crInterface checked)
+      let allDefs = HashMap.toList (_sigDefinitions sig)
 
-  -- Get all definitions from the interface's signature (not global signature)
-  let sig = iSignature (crInterface checked)
-  let allDefs = HashMap.toList (_sigDefinitions sig)
+      -- Filter for axioms (postulates) and extract information
+      postulates <- catMaybes <$> forM allDefs (\(qname, def) -> do
+        case theDef def of
+          Axiom{} -> do
+            -- Get type as text
+            typ <- prettyTCM (defType def)
+            -- Get the name range (position in file)
+            let nameRange = nameBindingSite (qnameName qname)
+            return $ Just PostulateInfo
+              { pName = T.pack $ prettyShow qname
+              , pType = T.pack $ render typ
+              , pRange = rangeToTuple nameRange
+              }
+          _ -> return Nothing
+        )
 
-  -- Filter for axioms (postulates) and extract information
-  postulates <- catMaybes <$> forM allDefs (\(qname, def) -> do
-    case theDef def of
-      Axiom{} -> do
-        -- Get type as text
-        typ <- prettyTCM (defType def)
-        -- Get the name range (position in file)
-        let nameRange = nameBindingSite (qnameName qname)
-        return $ Just PostulateInfo
-          { pName = T.pack $ prettyShow qname
-          , pType = T.pack $ render typ
-          , pRange = rangeToTuple nameRange
-          }
-      _ -> return Nothing
+      pure $ AgdaResult True "Success" (Just $ JSON.toJSON postulates)
+    )
+    (\err -> do
+      -- Simplify error message - just get the error description without full type details
+      errMsg <- prettyTCM err
+      let simplifiedMsg = T.pack $ take 500 $ render errMsg  -- Truncate to 500 chars
+      pure $ AgdaResult False ("Type-checking failed: " <> simplifiedMsg) Nothing
     )
 
-  pure $ AgdaResult True "Success" (Just $ JSON.toJSON postulates)
+mcpGoalAtPosition :: IORef ServerState -> FilePath -> Int -> Int -> TCM AgdaResult
+mcpGoalAtPosition stateRef filepath line col = do
+  -- Wrap in error handler
+  catchError
+    (do
+      -- Use cached load if available
+      checked <- loadFileWithCache stateRef filepath
+
+      -- Get all interaction points (goals)
+      interactionIds <- getInteractionPoints
+
+      -- Find the goal at the specified position
+      matchingGoal <- findGoalAtPosition interactionIds line col
+
+      case matchingGoal of
+        Nothing -> pure $ AgdaResult False "No goal found at specified position" Nothing
+        Just (iid, range, goalTypeText) -> do
+          let goalInfo = JSON.object
+                [ "goalId" JSON..= (\(InteractionId n) -> n) iid
+                , "goalType" JSON..= goalTypeText
+                , "range" JSON..= rangeToTuple range
+                ]
+          pure $ AgdaResult True "Success" (Just goalInfo)
+    )
+    (\err -> do
+      errMsg <- prettyTCM err
+      let simplifiedMsg = T.pack $ take 500 $ render errMsg
+      pure $ AgdaResult False ("Type-checking failed: " <> simplifiedMsg) Nothing
+    )
+  where
+    findGoalAtPosition :: [InteractionId] -> Int -> Int -> TCM (Maybe (InteractionId, Range, Text))
+    findGoalAtPosition [] _ _ = return Nothing
+    findGoalAtPosition (iid:rest) targetLine targetCol = do
+      range <- getInteractionRange iid
+      let (startLine, startCol, endLine, endCol) = rangeToTuple range
+      -- Check if position falls within this goal's range
+      if positionInRange targetLine targetCol startLine startCol endLine endCol
+        then do
+          constraint <- BasicOps.typeOfMeta AsIs iid
+          goalTypeText <- renderConstraintType constraint
+          return $ Just (iid, range, goalTypeText)
+        else
+          findGoalAtPosition rest targetLine targetCol
+
+    positionInRange :: Int -> Int -> Int -> Int -> Int -> Int -> Bool
+    positionInRange targetLine targetCol startLine startCol endLine endCol
+      | targetLine < startLine = False
+      | targetLine > endLine = False
+      | targetLine == startLine && targetCol < startCol = False
+      | targetLine == endLine && targetCol > endCol = False
+      | otherwise = True
+
+mcpGotoDefinition :: IORef ServerState -> FilePath -> Int -> Int -> TCM AgdaResult
+mcpGotoDefinition stateRef filepath line col = do
+  -- Wrap in error handler
+  catchError
+    (do
+      -- Use cached load if available
+      checked <- loadFileWithCache stateRef filepath
+
+      -- Extract highlighting directly from the interface after type-checking
+      -- This is synchronous and doesn't require waiting for async callbacks
+      let interface = crInterface checked
+      let highlighting = iHighlighting interface
+
+      liftIO $ putStrLn $ "Extracted highlighting directly from interface"
+
+      -- We need to convert HighlightingInfo to JSON
+      -- HighlightingInfo is RangeMap Aspects
+      -- Let's check what the callback received and log it
+      stateAfterLoad <- liftIO $ readIORef stateRef
+      case highlightingInfo stateAfterLoad of
+        Nothing -> do
+          liftIO $ putStrLn "No highlighting in callback, but we have it from interface"
+          -- For now, return error - need to implement direct conversion
+          pure $ AgdaResult False "Highlighting available but conversion not yet implemented. Need to parse RangeMap Aspects directly." Nothing
+        Just highlightJson -> do
+          liftIO $ do
+            let jsonText = TE.decodeUtf8 $ LBS.toStrict $ JSON.encode highlightJson
+            putStrLn $ "Highlighting JSON from callback (first 2000 chars): " ++ take 2000 (T.unpack jsonText)
+          -- Parse highlighting to find definition at position
+          case findDefinitionAtPosition highlightJson line col of
+            Nothing -> pure $ AgdaResult False "No definition found at specified position. The position may be on whitespace, keywords, or symbols without definition sites." Nothing
+            Just defInfo -> pure $ AgdaResult True "Success" (Just defInfo)
+    )
+    (\err -> do
+      errMsg <- prettyTCM err
+      let simplifiedMsg = T.pack $ take 500 $ render errMsg
+      pure $ AgdaResult False ("Type-checking failed: " <> simplifiedMsg) Nothing
+    )
+  where
+    findDefinitionAtPosition :: JSON.Value -> Int -> Int -> Maybe JSON.Value
+    findDefinitionAtPosition highlightJson line col = do
+      -- Extract payload array from highlighting JSON structure
+      info <- getJSONField "info" highlightJson
+      payload <- getJSONField "payload" info
+      payloadArray <- case payload of
+        JSON.Array arr -> Just arr
+        _ -> Nothing
+
+      -- Search through payload for entry at given position
+      findMatchingEntry (V.toList payloadArray) line col
+
+    findMatchingEntry :: [JSON.Value] -> Int -> Int -> Maybe JSON.Value
+    findMatchingEntry [] _ _ = Nothing
+    findMatchingEntry (entry:rest) targetLine targetCol = do
+      -- Check if this entry's range contains the target position
+      rangeVal <- getJSONField "range" entry
+      (startPos, endPos) <- case rangeVal of
+        JSON.Array arr | V.length arr >= 2 ->
+          case (arr V.! 0, arr V.! 1) of
+            (JSON.Number s, JSON.Number e) -> Just (floor s :: Int, floor e :: Int)
+            _ -> Nothing
+        _ -> Nothing
+
+      -- Ranges in Agda highlighting are character offsets, not line/col
+      -- For now, skip position matching and just look for definitionSite
+      defSite <- getJSONField "definitionSite" entry
+      case defSite of
+        JSON.Null -> findMatchingEntry rest targetLine targetCol
+        _ -> Just defSite  -- Found a definition site
+
+    getJSONField :: Text -> JSON.Value -> Maybe JSON.Value
+    getJSONField field (JSON.Object obj) = JSON.KeyMap.lookup (JSON.Key.fromText field) obj
+    getJSONField _ _ = Nothing
 
 mcpGetGoals :: IORef ServerState -> TCM AgdaResult
 mcpGetGoals stateRef = do
@@ -527,13 +717,13 @@ initServerState :: IO (IORef ServerState)
 initServerState = do
   chan <- newChan
   responseVarRef <- newIORef Nothing
-  stateRef <- newIORef (ServerState Nothing Nothing chan Nothing responseVarRef)
+  stateRef <- newIORef (ServerState Nothing Nothing Nothing chan Nothing responseVarRef)
 
   -- Start persistent REPL in background thread
   threadId <- forkIO $ do
     putStrLn "Starting persistent Agda REPL thread..."
     result <- runTCMTop $ Repl.mcpRepl
-      (mcpCallback responseVarRef)              -- Response callback with IORef
+      (mcpCallback stateRef responseVarRef)     -- Response callback with state and response refs
       (readCommandFromChan responseVarRef chan) -- Command source with IORef
       (return ())                               -- No special setup
     case result of
@@ -549,7 +739,7 @@ initServerState = do
 -- This will be called by the mcp-server library when a tool is invoked
 handleAgdaTool :: IORef ServerState -> AgdaMCP.Types.AgdaTool -> IO MCP.Server.Content
 handleAgdaTool stateRef tool = do
-  -- Special handling for AgdaListPostulates (doesn't use REPL)
+  -- Special handling for tools that need custom logic (don't use REPL)
   case tool of
     AgdaMCP.Types.AgdaListPostulates{file} -> do
       -- Run directly in TCM (not through REPL)
@@ -561,6 +751,28 @@ handleAgdaTool stateRef tool = do
           let responseText = Format.formatResponse responseFormat val
           pure $ MCP.Server.ContentText responseText
         Right _ -> pure $ MCP.Server.ContentText "No postulates found"
+
+    AgdaMCP.Types.AgdaGoalAtPosition{file, line, column} -> do
+      -- Run directly in TCM to find goal at position
+      result <- runTCMTop $ mcpGoalAtPosition stateRef (T.unpack file) line column
+      case result of
+        Left err -> pure $ MCP.Server.ContentText $ "Error: " <> T.pack (show err)
+        Right (AgdaResult _ _ (Just val)) -> do
+          let responseFormat = Format.getFormat tool
+          let responseText = Format.formatResponse responseFormat val
+          pure $ MCP.Server.ContentText responseText
+        Right (AgdaResult _ msg Nothing) -> pure $ MCP.Server.ContentText msg
+
+    AgdaMCP.Types.AgdaGotoDefinition{file, line, column} -> do
+      -- Run directly in TCM to find definition at position
+      result <- runTCMTop $ mcpGotoDefinition stateRef (T.unpack file) line column
+      case result of
+        Left err -> pure $ MCP.Server.ContentText $ "Error: " <> T.pack (show err)
+        Right (AgdaResult _ _ (Just val)) -> do
+          let responseFormat = Format.getFormat tool
+          let responseText = Format.formatResponse responseFormat val
+          pure $ MCP.Server.ContentText responseText
+        Right (AgdaResult _ msg Nothing) -> pure $ MCP.Server.ContentText msg
 
     -- All other tools go through REPL
     _ -> do

@@ -28,6 +28,9 @@ formatResponse Types.Concise jsonValue =
     -- Check for postulates list (JSON array with pName/pType/pRange fields)
     JSON.Array arr | not (V.null arr) && isPostulateArray arr ->
       formatPostulates jsonValue
+    -- Check for single goal object (goalId, goalType, range fields)
+    JSON.Object obj | isSingleGoalObject obj ->
+      formatSingleGoal jsonValue
     -- Check for standard Agda response with "kind" field
     _ -> case getField "kind" jsonValue of
       Just (JSON.String "DisplayInfo") -> formatDisplayInfo jsonValue
@@ -58,6 +61,8 @@ getFormat tool =
         Types.AgdaSolveOne{Types.format=fmt} -> fmt
         Types.AgdaHelperFunction{Types.format=fmt} -> fmt
         Types.AgdaGoalTypeContext{Types.format=fmt} -> fmt
+        Types.AgdaGoalAtPosition{Types.format=fmt} -> fmt
+        Types.AgdaGotoDefinition{Types.format=fmt} -> fmt
         Types.AgdaSearchAbout{Types.format=fmt} -> fmt
         Types.AgdaShowModule{Types.format=fmt} -> fmt
         Types.AgdaShowConstraints{Types.format=fmt} -> fmt
@@ -211,7 +216,7 @@ formatAuto infoValue =
 -- Format search about results (type search)
 formatSearchAbout :: JSON.Value -> Text
 formatSearchAbout infoValue =
-  case getField "searchResults" infoValue of
+  case getField "results" infoValue of
     Just (JSON.Array results) ->
       if V.null results
         then "No results found"
@@ -322,6 +327,35 @@ formatSolveAll jsonValue =
         (Just (JSON.Number gid), Just (JSON.String expr)) ->
           "?" <> T.pack (show (floor gid :: Int)) <> " := " <> expr
         _ -> extractText sol
+
+-- ============================================================================
+-- Single Goal Formatting
+-- ============================================================================
+
+-- Check if object is a single goal (has goalId, goalType, range fields)
+isSingleGoalObject :: JSON.KeyMap.KeyMap JSON.Value -> Bool
+isSingleGoalObject obj =
+  let hasGoalId = JSON.KeyMap.member (JSON.Key.fromText "goalId") obj
+      hasGoalType = JSON.KeyMap.member (JSON.Key.fromText "goalType") obj
+      hasRange = JSON.KeyMap.member (JSON.Key.fromText "range") obj
+  in hasGoalId && hasGoalType && hasRange
+
+formatSingleGoal :: JSON.Value -> Text
+formatSingleGoal jsonValue =
+  let goalId = case getField "goalId" jsonValue of
+        Just (JSON.Number n) -> T.pack $ show (floor n :: Int)
+        _ -> "?"
+      goalType = case getField "goalType" jsonValue of
+        Just (JSON.String t) -> t
+        _ -> "?"
+      range = case getField "range" jsonValue of
+        Just (JSON.Array arr) | V.length arr >= 2 ->
+          case (arr V.! 0, arr V.! 1) of
+            (JSON.Number line, JSON.Number col) ->
+              "(" <> T.pack (show (floor line :: Int)) <> ":" <> T.pack (show (floor col :: Int)) <> ")"
+            _ -> ""
+        _ -> ""
+  in "?<" <> goalId <> "> : " <> goalType <> " " <> range
 
 -- ============================================================================
 -- Postulates Formatting
