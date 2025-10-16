@@ -24,7 +24,8 @@ import qualified Data.Vector as V
 import Data.Text (Text)
 import Data.IORef
 import GHC.Generics (Generic)
-import Control.Monad (forM)
+import Control.Monad (forM, unless)
+import qualified Data.List
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Except (catchError)
 import Control.Concurrent (forkIO, ThreadId, threadDelay)
@@ -36,6 +37,7 @@ import System.FilePath (takeDirectory)
 import qualified MCP.Server
 import qualified AgdaMCP.Types
 import qualified AgdaMCP.Repl as Repl
+import qualified AgdaMCP.FileEdit as FileEdit
 
 -- Agda imports - using the actual interaction functions
 import Agda.Interaction.Base
@@ -54,9 +56,11 @@ import Agda.Syntax.Position (Range, rStart, rEnd, posLine, posCol, noRange)
 import Agda.Syntax.Scope.Base (WhyInScopeData(..))
 import Agda.Syntax.Abstract (Expr)
 import Agda.Syntax.Abstract.Name (QName(..), nameBindingSite, qnameName)
+import Agda.Syntax.Translation.AbstractToConcrete (abstractToConcrete_)
 
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Monad.Options (getAgdaLibFilesWithoutTopLevelModuleName, setLibraryIncludes)
+import Agda.TypeChecking.Monad.MetaVars (getInteractionRange)
 import Agda.TypeChecking.Pretty (prettyTCM, prettyA)
 
 import Agda.Utils.FileName (absolute, filePath)
@@ -151,7 +155,16 @@ mcpCallback stateRef responseVarRef resp = do
 
   if isContentResponse
     then do
-      -- Encode response in the current TCM context
+      -- NEW: Extract file edits BEFORE encoding
+      -- This works with typed Response values in TCM context
+      fileEdits <- extractFileEditsFromResponse stateRef resp
+
+      -- Apply file edits if any
+      unless (null fileEdits) $ liftIO $ do
+        putStrLn $ "Applying " ++ show (length fileEdits) ++ " file edit(s)"
+        FileEdit.applyFileEdits fileEdits
+
+      -- Continue with existing flow: encode response
       jsonValue <- encodeTCM resp
 
       -- Special handling for highlighting info - store in state instead of routing
@@ -178,6 +191,70 @@ mcpCallback stateRef responseVarRef resp = do
               putStrLn "Warning: Received response with no waiting handler"
     else liftIO $
       putStrLn "Agda non-content response (skipped)"
+
+-- ============================================================================
+-- File Edit Extraction (in TCM context)
+-- ============================================================================
+
+-- | Extract file edits from Response in TCM context
+-- This runs BEFORE encoding to JSON, using typed Response values
+extractFileEditsFromResponse :: IORef ServerState -> Response -> TCM [FileEdit.FileEdit]
+extractFileEditsFromResponse stateRef resp = do
+  state <- liftIO $ readIORef stateRef
+  let maybeFile = currentFile state
+
+  case (resp, maybeFile) of
+    -- Give: In-place hole replacement
+    (Resp_GiveAction ii (Give_String str), Just file) -> do
+      range <- getInteractionRange ii
+      let filepath = filePath file
+      liftIO $ putStrLn $ "Extracting GiveAction (Give_String) for goal " ++ show ii
+      return [FileEdit.ReplaceHole filepath range (T.pack str) False]
+
+    (Resp_GiveAction ii Give_Paren, Just file) -> do
+      range <- getInteractionRange ii
+      let filepath = filePath file
+      liftIO $ putStrLn $ "Extracting GiveAction (Give_Paren) for goal " ++ show ii
+      return [FileEdit.ReplaceHole filepath range "" True]
+
+    (Resp_GiveAction ii Give_NoParen, Just file) -> do
+      -- Give_NoParen: don't remove braces, just leave content as-is
+      -- This means we don't need to edit the file at all
+      liftIO $ putStrLn $ "GiveAction (Give_NoParen) for goal " ++ show ii ++ " - no file edit needed"
+      return []
+
+    -- MakeCase: Line replacement + multiple clauses
+    (Resp_MakeCase ii variant clauses, Just file) -> do
+      range <- getInteractionRange ii
+      let filepath = filePath file
+      let (lineNum, col, _, _) = FileEdit.rangeToPositions range
+      -- Get indentation from column position
+      let indentLevel = col - 1
+      liftIO $ putStrLn $ "Extracting MakeCase for goal " ++ show ii ++
+                          " at line " ++ show lineNum ++
+                          " with " ++ show (length clauses) ++ " clauses"
+      return [FileEdit.ReplaceLine filepath lineNum (map T.pack clauses) indentLevel True]
+
+    -- SolveAll: Batch of hole replacements
+    (Resp_SolveAll solutions, Just file) -> do
+      let filepath = filePath file
+      liftIO $ putStrLn $ "Extracting SolveAll with " ++ show (length solutions) ++ " solutions"
+
+      -- Extract edits for each solution
+      -- Note: solutions are already concrete Expr (not abstract)
+      ops <- forM solutions $ \(ii, expr) -> do
+        range <- getInteractionRange ii
+        -- expr is already Concrete.Expr, just prettyShow it
+        let exprStr = prettyShow expr
+        liftIO $ putStrLn $ "  Solution for goal " ++ show ii ++ ": " ++ exprStr
+        return $ FileEdit.ReplaceHole filepath range (T.pack exprStr) False
+
+      -- Sort in reverse position order (bottom to top)
+      let sorted = Data.List.sortBy FileEdit.compareFileEditReverse ops
+      return [FileEdit.BatchEdits filepath sorted]
+
+    -- No file edits for other response types
+    _ -> return []
 
 -- | Convert MCP tool to Agda IOTCM command
 -- Takes the current file path (empty string if no file loaded)
