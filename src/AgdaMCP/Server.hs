@@ -254,7 +254,25 @@ extractFileEditsFromResponse stateRef resp = do
       return [FileEdit.BatchEdits filepath sorted]
 
     -- No file edits for other response types
-    _ -> return []
+    _ -> do
+      liftIO $ putStrLn $ "extractFileEditsFromResponse: No file edits for response type: " ++ show (responseType resp)
+      return []
+  where
+    responseType :: Response -> String
+    responseType (Resp_HighlightingInfo _ _ _ _) = "HighlightingInfo"
+    responseType (Resp_Status _) = "Status"
+    responseType (Resp_JumpToError _ _) = "JumpToError"
+    responseType (Resp_InteractionPoints _) = "InteractionPoints"
+    responseType (Resp_GiveAction _ _) = "GiveAction"
+    responseType (Resp_MakeCase _ _ _) = "MakeCase"
+    responseType (Resp_SolveAll _) = "SolveAll"
+    responseType (Resp_Mimer _ _) = "Mimer"
+    responseType (Resp_DisplayInfo _) = "DisplayInfo"
+    responseType (Resp_RunningInfo _ _) = "RunningInfo"
+    responseType Resp_ClearRunningInfo = "ClearRunningInfo"
+    responseType (Resp_ClearHighlighting _) = "ClearHighlighting"
+    responseType Resp_DoneAborting = "DoneAborting"
+    responseType Resp_DoneExiting = "DoneExiting"
 
 -- | Convert MCP tool to Agda IOTCM command
 -- Takes the current file path (empty string if no file loaded)

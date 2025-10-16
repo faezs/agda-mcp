@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module AgdaMCP.ServerSpec (tests) where
 
@@ -9,13 +10,15 @@ import qualified Data.Aeson.Key as JSON.Key
 import qualified Data.Aeson.KeyMap as JSON.KeyMap
 import qualified Data.Text as T
 import Data.Text (Text)
+import qualified Data.Text.IO as TIO
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Vector as V
 import Data.IORef
-import System.FilePath ((</>))
-import System.Directory (getCurrentDirectory)
-import Control.Exception (try, SomeException)
+import System.FilePath ((</>), takeDirectory, takeBaseName, takeFileName)
+import System.Directory (getCurrentDirectory, copyFile, removeFile, createDirectoryIfMissing, removeDirectoryRecursive, getTemporaryDirectory)
+import Control.Exception (try, SomeException, bracket, catch)
+import System.Random (randomIO)
 
 import AgdaMCP.Server
 import qualified AgdaMCP.Types as Types
@@ -149,6 +152,33 @@ searchTestFile = do
   cwd <- getCurrentDirectory
   pure $ cwd </> "test" </> "SearchTest.agda"
 
+-- | Create a temp copy of a test file in a temp directory and ensure cleanup
+-- Preserves the original filename so Agda's module name checking works
+-- Uses random hash to avoid conflicts between parallel tests
+withTempFile :: FilePath -> (FilePath -> IO a) -> IO a
+withTempFile sourceFile action = do
+  tmpDir <- getTemporaryDirectory
+  -- Generate random hash for unique temp dir per test invocation
+  randomHash <- randomIO :: IO Int
+  let tempDir = tmpDir </> ("agda-mcp-test-" ++ show (abs randomHash))
+  let filename = takeFileName sourceFile
+  let tempFile = tempDir </> filename
+  bracket
+    (do
+      createDirectoryIfMissing True tempDir
+      copyFile sourceFile tempFile
+      return tempFile)
+    (\_ -> removeDirectoryRecursive tempDir `catch` (\(_ :: SomeException) -> pure ()))
+    action
+
+-- | Universal helper: create temp file, load it, run action with state and temp path
+withLoadedTempFile :: FilePath -> (IORef ServerState -> FilePath -> IO a) -> IO a
+withLoadedTempFile sourceFile action = do
+  withTempFile sourceFile $ \tempFile -> do
+    stateRef <- initServerState
+    _ <- handleAgdaTool stateRef (Types.AgdaLoad { Types.file = T.pack tempFile, Types.format = Nothing })
+    action stateRef tempFile
+
 -- | Tests for agda_load
 loadTests :: TestTree
 loadTests = testGroup "agda_load"
@@ -212,258 +242,284 @@ getGoalsTests = testGroup "agda_get_goals"
 getGoalTypeTests :: TestTree
 getGoalTypeTests = testGroup "agda_get_goal_type"
   [ simpleTestCase "gets type of goal 0" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaGetGoalType { Types.goalId = 0, Types.format = Nothing }
-      response <- runTool stateRef tool
+      file <- exampleFile
+      withLoadedTempFile file $ \stateRef _tempFile -> do
+        let tool = Types.AgdaGetGoalType { Types.goalId = 0, Types.format = Nothing }
+        response <- runTool stateRef tool
 
-      -- Should return DisplayInfo with goal type
-      let kind = getField "kind" response
-      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
+        -- Should return DisplayInfo with goal type
+        let kind = getField "kind" response
+        assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
 
   , simpleTestCase "fails on invalid goal ID" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaGetGoalType { Types.goalId = 999, Types.format = Nothing }
-      response <- runTool stateRef tool
+      file <- exampleFile
+      withLoadedTempFile file $ \stateRef _tempFile -> do
+        let tool = Types.AgdaGetGoalType { Types.goalId = 999, Types.format = Nothing }
+        response <- runTool stateRef tool
 
-      -- Should return error
-      let kind = getField "kind" response
-      assertBool "Should have error" (kind == Just (JSON.String "DisplayInfo"))
+        -- Should return error
+        let kind = getField "kind" response
+        assertBool "Should have error" (kind == Just (JSON.String "DisplayInfo"))
   ]
 
 getGoalTypeImplicitsTests :: TestTree
 getGoalTypeImplicitsTests = testGroup "agda_get_goal_type_implicits"
   [ simpleTestCase "gets type of goal 0 with implicits" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaGetGoalTypeImplicits { Types.goalId = 0, Types.format = Nothing }
-      response <- runTool stateRef tool
+      file <- exampleFile
+      withLoadedTempFile file $ \stateRef _tempFile -> do
+        let tool = Types.AgdaGetGoalTypeImplicits { Types.goalId = 0, Types.format = Nothing }
+        response <- runTool stateRef tool
 
-      -- Should return DisplayInfo with goal type (showing implicit arguments)
-      let kind = getField "kind" response
-      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
+        -- Should return DisplayInfo with goal type (showing implicit arguments)
+        let kind = getField "kind" response
+        assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
 
   , simpleTestCase "fails on invalid goal ID" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaGetGoalTypeImplicits { Types.goalId = 999, Types.format = Nothing }
-      response <- runTool stateRef tool
+      file <- exampleFile
+      withLoadedTempFile file $ \stateRef _tempFile -> do
+        let tool = Types.AgdaGetGoalTypeImplicits { Types.goalId = 999, Types.format = Nothing }
+        response <- runTool stateRef tool
 
-      -- Should return error
-      let kind = getField "kind" response
-      assertBool "Should have error" (kind == Just (JSON.String "DisplayInfo"))
+        -- Should return error
+        let kind = getField "kind" response
+        assertBool "Should have error" (kind == Just (JSON.String "DisplayInfo"))
   ]
 
 -- | Tests for agda_get_context
 getContextTests :: TestTree
 getContextTests = testGroup "agda_get_context"
   [ simpleTestCase "gets context at goal 0" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaGetContext { Types.goalId = 0, Types.format = Nothing }
-      response <- runTool stateRef tool
+      file <- exampleFile
+      withLoadedTempFile file $ \stateRef _tempFile -> do
+        let tool = Types.AgdaGetContext { Types.goalId = 0, Types.format = Nothing }
+        response <- runTool stateRef tool
 
-      let kind = getField "kind" response
-      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
+        let kind = getField "kind" response
+        assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
 
-      -- Context should contain variable 'n'
-      -- (We can't easily assert the exact content without parsing the full structure)
+        -- Context should contain variable 'n'
+        -- (We can't easily assert the exact content without parsing the full structure)
   ]
 
 getContextImplicitsTests :: TestTree
 getContextImplicitsTests = testGroup "agda_get_context_implicits"
   [ simpleTestCase "gets context at goal 0 with implicits" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaGetContextImplicits { Types.goalId = 0, Types.format = Nothing }
-      response <- runTool stateRef tool
+      file <- exampleFile
+      withLoadedTempFile file $ \stateRef _tempFile -> do
+        let tool = Types.AgdaGetContextImplicits { Types.goalId = 0, Types.format = Nothing }
+        response <- runTool stateRef tool
 
-      -- Should return DisplayInfo with context (showing implicit arguments in types)
-      let kind = getField "kind" response
-      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
+        -- Should return DisplayInfo with context (showing implicit arguments in types)
+        let kind = getField "kind" response
+        assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
   ]
 
 -- | Tests for agda_give
 giveTests :: TestTree
 giveTests = testGroup "agda_give"
   [ simpleTestCase "successful give returns GiveAction" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaGive { Types.goalId = 0, Types.expression = "n", Types.format = Nothing }
-      response <- runTool stateRef tool
+      file <- exampleFile
+      withLoadedTempFile file $ \stateRef _tempFile -> do
+        let tool = Types.AgdaGive { Types.goalId = 0, Types.expression = "n", Types.format = Nothing }
+        response <- runTool stateRef tool
 
-      let kind = getField "kind" response
-      assertEqual "Should be GiveAction" (Just (JSON.String "GiveAction")) kind
+        let kind = getField "kind" response
+        assertEqual "Should be GiveAction" (Just (JSON.String "GiveAction")) kind
 
-      let giveResult = getField "giveResult" response
-      assertBool "Should have giveResult" (giveResult /= Nothing)
+        let giveResult = getField "giveResult" response
+        assertBool "Should have giveResult" (giveResult /= Nothing)
 
   , simpleTestCase "failed give returns error" $ do
-      stateRef <- loadedState
-      -- Use a completely invalid expression to trigger a parse/scope error
-      let tool = Types.AgdaGive { Types.goalId = 0, Types.expression = "nonExistentName123", Types.format = Nothing }
-      response <- runTool stateRef tool
+      file <- exampleFile
+      withLoadedTempFile file $ \stateRef _tempFile -> do
+        -- Use a completely invalid expression to trigger a parse/scope error
+        let tool = Types.AgdaGive { Types.goalId = 0, Types.expression = "nonExistentName123", Types.format = Nothing }
+        response <- runTool stateRef tool
 
-      let kind = getField "kind" response
-      -- Should be DisplayInfo with error (scope error for undefined name)
-      assertEqual "Should be DisplayInfo with error" (Just (JSON.String "DisplayInfo")) kind
+        let kind = getField "kind" response
+        -- Should be DisplayInfo with error (scope error for undefined name)
+        assertEqual "Should be DisplayInfo with error" (Just (JSON.String "DisplayInfo")) kind
 
-      -- Check for error in info
-      let info = getField "info" response
-      case info of
-        Just (JSON.Object obj) -> do
-          let infoKind = JSON.KeyMap.lookup (JSON.Key.fromText "kind") obj
-          assertEqual "Info kind should be Error" (Just (JSON.String "Error")) infoKind
-        _ -> assertFailure "Should have info object"
+        -- Check for error in info
+        let info = getField "info" response
+        case info of
+          Just (JSON.Object obj) -> do
+            let infoKind = JSON.KeyMap.lookup (JSON.Key.fromText "kind") obj
+            assertEqual "Info kind should be Error" (Just (JSON.String "Error")) infoKind
+          _ -> assertFailure "Should have info object"
   ]
 
 -- | Tests for agda_refine
 refineTests :: TestTree
 refineTests = testGroup "agda_refine"
   [ simpleTestCase "refines goal with constructor" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaRefine { Types.goalId = 1, Types.expression = "suc", Types.format = Nothing }
-      response <- runTool stateRef tool
+      file <- exampleFile
+      withLoadedTempFile file $ \stateRef _tempFile -> do
+        let tool = Types.AgdaRefine { Types.goalId = 1, Types.expression = "suc", Types.format = Nothing }
+        response <- runTool stateRef tool
 
-      -- Refine should return GiveAction
-      let kind = getField "kind" response
-      assertBool "Should be GiveAction or DisplayInfo"
-        (kind == Just (JSON.String "GiveAction") || kind == Just (JSON.String "DisplayInfo"))
+        -- Refine should return GiveAction
+        let kind = getField "kind" response
+        assertBool "Should be GiveAction or DisplayInfo"
+          (kind == Just (JSON.String "GiveAction") || kind == Just (JSON.String "DisplayInfo"))
+
+        -- Should have some result indicating refinement occurred
+        assertBool "Should have kind field" (kind /= Nothing)
   ]
 
 -- | Tests for agda_case_split
 caseSplitTests :: TestTree
 caseSplitTests = testGroup "agda_case_split"
   [ simpleTestCase "splits on variable n" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaCaseSplit { Types.goalId = 0, Types.variable = "n", Types.format = Nothing }
-      response <- runTool stateRef tool
+      file <- exampleFile
+      withLoadedTempFile file $ \stateRef _tempFile -> do
+        let tool = Types.AgdaCaseSplit { Types.goalId = 0, Types.variable = "n", Types.format = Nothing }
+        response <- runTool stateRef tool
 
-      -- Case split returns MakeCase
-      let kind = getField "kind" response
-      assertBool "Should be MakeCase or DisplayInfo"
-        (kind == Just (JSON.String "MakeCase") || kind == Just (JSON.String "DisplayInfo"))
+        -- Case split returns MakeCase
+        let kind = getField "kind" response
+        assertBool "Should be MakeCase or DisplayInfo"
+          (kind == Just (JSON.String "MakeCase") || kind == Just (JSON.String "DisplayInfo"))
+
+        -- Should have clauses or result
+        assertBool "Should have kind field" (kind /= Nothing)
   ]
 
 -- | Tests for agda_compute
 computeTests :: TestTree
 computeTests = testGroup "agda_compute"
   [ simpleTestCase "computes expression" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaCompute { Types.goalId = 0, Types.expression = "suc zero", Types.format = Nothing }
-      response <- runTool stateRef tool
+      file <- exampleFile
+      withLoadedTempFile file $ \stateRef _tempFile -> do
+        let tool = Types.AgdaCompute { Types.goalId = 0, Types.expression = "suc zero", Types.format = Nothing }
+        response <- runTool stateRef tool
 
-      let kind = getField "kind" response
-      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
+        let kind = getField "kind" response
+        assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
   ]
 
 -- | Tests for agda_infer_type
 inferTypeTests :: TestTree
 inferTypeTests = testGroup "agda_infer_type"
   [ simpleTestCase "infers type of valid expression" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaInferType { Types.goalId = 0, Types.expression = "suc zero", Types.format = Nothing }
-      response <- runTool stateRef tool
+      file <- exampleFile
+      withLoadedTempFile file $ \stateRef _tempFile -> do
+        let tool = Types.AgdaInferType { Types.goalId = 0, Types.expression = "suc zero", Types.format = Nothing }
+        response <- runTool stateRef tool
 
-      let kind = getField "kind" response
-      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
+        let kind = getField "kind" response
+        assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
   ]
 
 -- | Tests for agda_intro
 introTests :: TestTree
 introTests = testGroup "agda_intro"
   [ simpleTestCase "introduces variables at identity goal" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaIntro { Types.goalId = 4, Types.format = Nothing }  -- identity function goal
-      response <- runTool stateRef tool
+      file <- exampleFile
+      withLoadedTempFile file $ \stateRef _tempFile -> do
+        let tool = Types.AgdaIntro { Types.goalId = 4, Types.format = Nothing }  -- identity function goal
+        response <- runTool stateRef tool
 
-      let kind = getField "kind" response
-      assertBool "Should be GiveAction or DisplayInfo"
-        (kind == Just (JSON.String "GiveAction") || kind == Just (JSON.String "DisplayInfo"))
+        let kind = getField "kind" response
+        assertBool "Should be GiveAction or DisplayInfo"
+          (kind == Just (JSON.String "GiveAction") || kind == Just (JSON.String "DisplayInfo"))
   ]
 
 -- | Tests for agda_auto
 autoTests :: TestTree
 autoTests = testGroup "agda_auto"
   [ simpleTestCase "attempts auto on simple goal" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaAuto { Types.goalId = 0, Types.timeout = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+      file <- exampleFile
+      withLoadedTempFile file $ \stateRef _tempFile -> do
+        let tool = Types.AgdaAuto { Types.goalId = 0, Types.timeout = Nothing, Types.format = Nothing }
+        response <- runTool stateRef tool
 
-      -- Auto may succeed (GiveAction) or fail (DisplayInfo with error/auto result)
-      let kind = getField "kind" response
-      assertBool "Should be DisplayInfo or GiveAction (success!)"
-        (kind == Just (JSON.String "DisplayInfo") || kind == Just (JSON.String "GiveAction"))
+        -- Auto may succeed (GiveAction) or fail (DisplayInfo with error/auto result)
+        let kind = getField "kind" response
+        assertBool "Should be DisplayInfo or GiveAction (success!)"
+          (kind == Just (JSON.String "DisplayInfo") || kind == Just (JSON.String "GiveAction"))
 
   , simpleTestCase "respects timeout parameter" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaAuto { Types.goalId = 0, Types.timeout = Just 1000, Types.format = Nothing }
-      response <- runTool stateRef tool
+      file <- exampleFile
+      withLoadedTempFile file $ \stateRef _tempFile -> do
+        let tool = Types.AgdaAuto { Types.goalId = 0, Types.timeout = Just 1000, Types.format = Nothing }
+        response <- runTool stateRef tool
 
-      -- Should complete within timeout
-      let kind = getField "kind" response
-      assertBool "Should return DisplayInfo or GiveAction"
-        (kind == Just (JSON.String "DisplayInfo") || kind == Just (JSON.String "GiveAction"))
+        -- Should complete within timeout
+        let kind = getField "kind" response
+        assertBool "Should return DisplayInfo or GiveAction"
+          (kind == Just (JSON.String "DisplayInfo") || kind == Just (JSON.String "GiveAction"))
   ]
 
 autoAllTests :: TestTree
 autoAllTests = testGroup "agda_auto_all"
   [ simpleTestCase "attempts auto on all goals" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaAutoAll { Types.timeout = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+      file <- exampleFile
+      withLoadedTempFile file $ \stateRef _tempFile -> do
+        let tool = Types.AgdaAutoAll { Types.timeout = Nothing, Types.format = Nothing }
+        response <- runTool stateRef tool
 
-      -- Should return SolveAll, GiveAction, or DisplayInfo
-      let kind = getField "kind" response
-      assertBool "Should be SolveAll, GiveAction, or DisplayInfo"
-        (kind == Just (JSON.String "SolveAll") ||
-         kind == Just (JSON.String "GiveAction") ||
-         kind == Just (JSON.String "DisplayInfo"))
+        -- Should return SolveAll, GiveAction, or DisplayInfo
+        let kind = getField "kind" response
+        assertBool "Should be SolveAll, GiveAction, or DisplayInfo"
+          (kind == Just (JSON.String "SolveAll") ||
+           kind == Just (JSON.String "GiveAction") ||
+           kind == Just (JSON.String "DisplayInfo"))
 
   , simpleTestCase "respects timeout parameter" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaAutoAll { Types.timeout = Just 2000, Types.format = Nothing }
-      response <- runTool stateRef tool
+      file <- exampleFile
+      withLoadedTempFile file $ \stateRef _tempFile -> do
+        let tool = Types.AgdaAutoAll { Types.timeout = Just 2000, Types.format = Nothing }
+        response <- runTool stateRef tool
 
-      -- Should complete within timeout
-      let kind = getField "kind" response
-      assertBool "Should return SolveAll, GiveAction, or DisplayInfo"
-        (kind == Just (JSON.String "SolveAll") ||
-         kind == Just (JSON.String "GiveAction") ||
-         kind == Just (JSON.String "DisplayInfo"))
+        -- Should complete within timeout
+        let kind = getField "kind" response
+        assertBool "Should return SolveAll, GiveAction, or DisplayInfo"
+          (kind == Just (JSON.String "SolveAll") ||
+           kind == Just (JSON.String "GiveAction") ||
+           kind == Just (JSON.String "DisplayInfo"))
   ]
 
 solveOneTests :: TestTree
 solveOneTests = testGroup "agda_solve_one"
   [ simpleTestCase "attempts to solve goal 0" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaSolveOne { Types.goalId = 0, Types.format = Nothing }
-      response <- runTool stateRef tool
+      file <- exampleFile
+      withLoadedTempFile file $ \stateRef _tempFile -> do
+        let tool = Types.AgdaSolveOne { Types.goalId = 0, Types.format = Nothing }
+        response <- runTool stateRef tool
 
-      -- Should return SolveAll, GiveAction, or DisplayInfo
-      let kind = getField "kind" response
-      assertBool "Should be SolveAll, GiveAction, or DisplayInfo"
-        (kind == Just (JSON.String "SolveAll") ||
-         kind == Just (JSON.String "GiveAction") ||
-         kind == Just (JSON.String "DisplayInfo"))
+        -- Should return SolveAll, GiveAction, or DisplayInfo
+        let kind = getField "kind" response
+        assertBool "Should be SolveAll, GiveAction, or DisplayInfo"
+          (kind == Just (JSON.String "SolveAll") ||
+           kind == Just (JSON.String "GiveAction") ||
+           kind == Just (JSON.String "DisplayInfo"))
   ]
 
 helperFunctionTests :: TestTree
 helperFunctionTests = testGroup "agda_helper_function"
   [ simpleTestCase "generates helper function for goal 0" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaHelperFunction { Types.goalId = 0, Types.helperName = "helper", Types.format = Nothing }
-      response <- runTool stateRef tool
+      file <- exampleFile
+      withLoadedTempFile file $ \stateRef _tempFile -> do
+        let tool = Types.AgdaHelperFunction { Types.goalId = 0, Types.helperName = "helper", Types.format = Nothing }
+        response <- runTool stateRef tool
 
-      -- Should return DisplayInfo with helper function suggestion
-      let kind = getField "kind" response
-      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
+        -- Should return DisplayInfo with helper function suggestion
+        let kind = getField "kind" response
+        assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
   ]
 
 goalTypeContextTests :: TestTree
 goalTypeContextTests = testGroup "agda_goal_type_context"
   [ simpleTestCase "gets type and context for goal 0" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaGoalTypeContext { Types.goalId = 0, Types.format = Nothing }
-      response <- runTool stateRef tool
+      file <- exampleFile
+      withLoadedTempFile file $ \stateRef _tempFile -> do
+        let tool = Types.AgdaGoalTypeContext { Types.goalId = 0, Types.format = Nothing }
+        response <- runTool stateRef tool
 
-      -- Should return DisplayInfo with both goal type and context
-      let kind = getField "kind" response
-      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
+        -- Should return DisplayInfo with both goal type and context
+        let kind = getField "kind" response
+        assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
   ]
 
 -- | Tests for agda_search_about
@@ -624,73 +680,80 @@ searchAboutTests = testGroup "agda_search_about"
 showModuleTests :: TestTree
 showModuleTests = testGroup "agda_show_module"
   [ simpleTestCase "shows builtin Nat module contents" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaShowModule { Types.moduleName = "Agda.Builtin.Nat", Types.format = Nothing }
-      response <- runTool stateRef tool
+      file <- exampleFile
+      withLoadedTempFile file $ \stateRef _tempFile -> do
+        let tool = Types.AgdaShowModule { Types.moduleName = "Agda.Builtin.Nat", Types.format = Nothing }
+        response <- runTool stateRef tool
 
-      -- Should return DisplayInfo with module contents
-      let kind = getField "kind" response
-      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
+        -- Should return DisplayInfo with module contents
+        let kind = getField "kind" response
+        assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
 
   , simpleTestCase "shows Data.Nat module contents" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaShowModule { Types.moduleName = "Data.Nat", Types.format = Nothing }
-      response <- runTool stateRef tool
+      file <- exampleFile
+      withLoadedTempFile file $ \stateRef _tempFile -> do
+        let tool = Types.AgdaShowModule { Types.moduleName = "Data.Nat", Types.format = Nothing }
+        response <- runTool stateRef tool
 
-      -- Should return DisplayInfo with module contents
-      let kind = getField "kind" response
-      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
+        -- Should return DisplayInfo with module contents
+        let kind = getField "kind" response
+        assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
 
   , simpleTestCase "handles non-existent module gracefully" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaShowModule { Types.moduleName = "NonExistent.Module", Types.format = Nothing }
-      response <- runTool stateRef tool
+      file <- exampleFile
+      withLoadedTempFile file $ \stateRef _tempFile -> do
+        let tool = Types.AgdaShowModule { Types.moduleName = "NonExistent.Module", Types.format = Nothing }
+        response <- runTool stateRef tool
 
-      -- Should return an error or DisplayInfo response
-      let kind = getField "kind" response
-      assertBool "Should be DisplayInfo or error response"
-        (kind == Just (JSON.String "DisplayInfo") || kind == Just (JSON.String "Error"))
+        -- Should return an error or DisplayInfo response
+        let kind = getField "kind" response
+        assertBool "Should be DisplayInfo or error response"
+          (kind == Just (JSON.String "DisplayInfo") || kind == Just (JSON.String "Error"))
   ]
 
 showConstraintsTests :: TestTree
 showConstraintsTests = testGroup "agda_show_constraints"
   [ simpleTestCase "shows constraints for loaded file" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaShowConstraints { Types.format = Nothing }
-      response <- runTool stateRef tool
+      file <- exampleFile
+      withLoadedTempFile file $ \stateRef _tempFile -> do
+        let tool = Types.AgdaShowConstraints { Types.format = Nothing }
+        response <- runTool stateRef tool
 
-      -- Should return DisplayInfo with constraints (or no constraints)
-      let kind = getField "kind" response
-      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
+        -- Should return DisplayInfo with constraints (or no constraints)
+        let kind = getField "kind" response
+        assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
 
   , simpleTestCase "returns no constraints for complete file" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaShowConstraints { Types.format = Nothing }
-      response <- runTool stateRef tool
+      file <- exampleFile
+      withLoadedTempFile file $ \stateRef _tempFile -> do
+        let tool = Types.AgdaShowConstraints { Types.format = Nothing }
+        response <- runTool stateRef tool
 
-      -- Example.agda should have no unsolved constraints
-      let kind = getField "kind" response
-      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
+        -- Example.agda should have no unsolved constraints
+        let kind = getField "kind" response
+        assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
   ]
 
 -- | Tests for agda_why_in_scope
 whyInScopeTests :: TestTree
 whyInScopeTests = testGroup "agda_why_in_scope"
   [ simpleTestCase "looks up existing name" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaWhyInScope { Types.name = "suc", Types.format = Nothing }
-      response <- runTool stateRef tool
+      file <- exampleFile
+      withLoadedTempFile file $ \stateRef _tempFile -> do
+        let tool = Types.AgdaWhyInScope { Types.name = "suc", Types.format = Nothing }
+        response <- runTool stateRef tool
 
-      let kind = getField "kind" response
-      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
+        let kind = getField "kind" response
+        assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
 
   , simpleTestCase "looks up non-existent name" $ do
-      stateRef <- loadedState
-      let tool = Types.AgdaWhyInScope { Types.name = "nonExistentName123", Types.format = Nothing }
-      response <- runTool stateRef tool
+      file <- exampleFile
+      withLoadedTempFile file $ \stateRef _tempFile -> do
+        let tool = Types.AgdaWhyInScope { Types.name = "nonExistentName123", Types.format = Nothing }
+        response <- runTool stateRef tool
 
-      let kind = getField "kind" response
-      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
+        let kind = getField "kind" response
+        assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
   ]
 
 -- | Tests for agda_list_postulates
@@ -830,7 +893,8 @@ goalAtPositionTests = testGroup "agda_goal_at_position"
       assertBool "Should contain type separator" (T.isInfixOf ":" response)
   ]
 
--- | Helper to create a loaded state for tests
+-- | Helper to create a loaded state for tests (DEPRECATED - use withLoadedTempFile instead)
+-- This is kept for backward compatibility but should not be used in new tests
 loadedState :: IO (IORef ServerState)
 loadedState = do
   stateRef <- initServerState
