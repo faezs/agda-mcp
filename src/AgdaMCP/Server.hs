@@ -9,6 +9,9 @@ module AgdaMCP.Server
   , initServerState
   , handleAgdaTool
   , handleAgdaResource
+  , initSessionManager
+  , handleAgdaToolWithSession
+  , handleAgdaResourceWithSession
   ) where
 
 import qualified Data.Aeson as JSON
@@ -27,7 +30,7 @@ import GHC.Generics (Generic)
 import Control.Monad (forM)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Except (catchError)
-import Control.Concurrent (forkIO, ThreadId, threadDelay)
+import Control.Concurrent (forkIO, ThreadId, threadDelay, killThread)
 import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, takeMVar, tryPutMVar)
 import System.FilePath (takeDirectory)
@@ -36,6 +39,7 @@ import System.FilePath (takeDirectory)
 import qualified MCP.Server
 import qualified AgdaMCP.Types
 import qualified AgdaMCP.Repl as Repl
+import qualified AgdaMCP.SessionManager as SessionManager
 
 -- Agda imports - using the actual interaction functions
 import Agda.Interaction.Base
@@ -841,3 +845,47 @@ handleAgdaResource stateRef uri resource = do
           pure $ MCP.Server.ResourceText uri "text/plain" $ message agdaRes
         Just val ->
           pure $ MCP.Server.ResourceText uri "application/json" $ TE.decodeUtf8 $ LBS.toStrict $ JSON.encode val
+
+-- ============================================================================
+-- Session-based Handlers (Multi-agent Support)
+-- ============================================================================
+
+-- | Initialize session manager instead of single server state
+-- This is the new entry point for Main.hs
+initSessionManager :: IO (SessionManager.SessionManager ServerState)
+initSessionManager = do
+  -- Create session manager with initServerState as the state initializer
+  -- and a cleanup function that kills the REPL thread
+  let cleanup stateRef = do
+        state <- readIORef stateRef
+        case replThreadId state of
+          Just tid -> do
+            putStrLn $ "Cleaning up REPL thread " ++ show tid
+            killThread tid
+          Nothing -> return ()
+
+  SessionManager.createSessionManager initServerState (Just cleanup)
+
+-- | Session-aware tool handler
+-- Extracts sessionId from tool, gets or creates session, routes to appropriate ServerState
+handleAgdaToolWithSession :: SessionManager.SessionManager ServerState -> AgdaMCP.Types.AgdaTool -> IO MCP.Server.Content
+handleAgdaToolWithSession manager tool = do
+  -- Extract session ID from tool (all tools now have this field)
+  let sessionId = AgdaMCP.Types.sessionId tool
+
+  -- Get or create session
+  stateRef <- SessionManager.getOrCreateSession manager sessionId
+
+  -- Update last used timestamp
+  SessionManager.updateLastUsed manager sessionId
+
+  -- Route to existing handler
+  handleAgdaTool stateRef tool
+
+-- | Session-aware resource handler
+handleAgdaResourceWithSession :: SessionManager.SessionManager ServerState -> MCP.Server.URI -> AgdaMCP.Types.AgdaResource -> IO MCP.Server.ResourceContent
+handleAgdaResourceWithSession manager uri resource = do
+  -- Resources don't have sessionId parameter, so use default session
+  -- In the future, we could extract session from URI query parameters
+  stateRef <- SessionManager.getOrCreateSession manager Nothing
+  handleAgdaResource stateRef uri resource

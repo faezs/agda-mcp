@@ -23,30 +23,30 @@ instance JSON.FromJSON ResponseFormat
 -- Note: format is Maybe Text for TH compatibility, parsed to ResponseFormat in handlers
 
 data AgdaTool
-    = AgdaLoad { file :: Text, format :: Maybe Text }
-    | AgdaGetGoals { format :: Maybe Text }
-    | AgdaGetGoalType { goalId :: Int, format :: Maybe Text }
-    | AgdaGetGoalTypeImplicits { goalId :: Int, format :: Maybe Text }
-    | AgdaGetContext { goalId :: Int, format :: Maybe Text }
-    | AgdaGetContextImplicits { goalId :: Int, format :: Maybe Text }
-    | AgdaGive { goalId :: Int, expression :: Text, format :: Maybe Text }
-    | AgdaRefine { goalId :: Int, expression :: Text, format :: Maybe Text }
-    | AgdaCaseSplit { goalId :: Int, variable :: Text, format :: Maybe Text }
-    | AgdaCompute { goalId :: Int, expression :: Text, format :: Maybe Text }
-    | AgdaInferType { goalId :: Int, expression :: Text, format :: Maybe Text }
-    | AgdaIntro { goalId :: Int, format :: Maybe Text }
-    | AgdaAuto { goalId :: Int, timeout :: Maybe Int, format :: Maybe Text }
-    | AgdaAutoAll { timeout :: Maybe Int, format :: Maybe Text }
-    | AgdaSolveOne { goalId :: Int, format :: Maybe Text }
-    | AgdaHelperFunction { goalId :: Int, helperName :: Text, format :: Maybe Text }
-    | AgdaGoalTypeContext { goalId :: Int, format :: Maybe Text }
-    | AgdaGoalAtPosition { file :: Text, line :: Int, column :: Int, format :: Maybe Text }
-    | AgdaGotoDefinition { file :: Text, line :: Int, column :: Int, format :: Maybe Text }
-    | AgdaSearchAbout { query :: Text, format :: Maybe Text }
-    | AgdaShowModule { moduleName :: Text, format :: Maybe Text }
-    | AgdaShowConstraints { format :: Maybe Text }
-    | AgdaWhyInScope { name :: Text, format :: Maybe Text }
-    | AgdaListPostulates { file :: Text, format :: Maybe Text }
+    = AgdaLoad { file :: Text, sessionId :: Maybe Text, format :: Maybe Text }
+    | AgdaGetGoals { sessionId :: Maybe Text, format :: Maybe Text }
+    | AgdaGetGoalType { goalId :: Int, sessionId :: Maybe Text, format :: Maybe Text }
+    | AgdaGetGoalTypeImplicits { goalId :: Int, sessionId :: Maybe Text, format :: Maybe Text }
+    | AgdaGetContext { goalId :: Int, sessionId :: Maybe Text, format :: Maybe Text }
+    | AgdaGetContextImplicits { goalId :: Int, sessionId :: Maybe Text, format :: Maybe Text }
+    | AgdaGive { goalId :: Int, expression :: Text, sessionId :: Maybe Text, format :: Maybe Text }
+    | AgdaRefine { goalId :: Int, expression :: Text, sessionId :: Maybe Text, format :: Maybe Text }
+    | AgdaCaseSplit { goalId :: Int, variable :: Text, sessionId :: Maybe Text, format :: Maybe Text }
+    | AgdaCompute { goalId :: Int, expression :: Text, sessionId :: Maybe Text, format :: Maybe Text }
+    | AgdaInferType { goalId :: Int, expression :: Text, sessionId :: Maybe Text, format :: Maybe Text }
+    | AgdaIntro { goalId :: Int, sessionId :: Maybe Text, format :: Maybe Text }
+    | AgdaAuto { goalId :: Int, timeout :: Maybe Int, sessionId :: Maybe Text, format :: Maybe Text }
+    | AgdaAutoAll { timeout :: Maybe Int, sessionId :: Maybe Text, format :: Maybe Text }
+    | AgdaSolveOne { goalId :: Int, sessionId :: Maybe Text, format :: Maybe Text }
+    | AgdaHelperFunction { goalId :: Int, helperName :: Text, sessionId :: Maybe Text, format :: Maybe Text }
+    | AgdaGoalTypeContext { goalId :: Int, sessionId :: Maybe Text, format :: Maybe Text }
+    | AgdaGoalAtPosition { file :: Text, line :: Int, column :: Int, sessionId :: Maybe Text, format :: Maybe Text }
+    | AgdaGotoDefinition { file :: Text, line :: Int, column :: Int, sessionId :: Maybe Text, format :: Maybe Text }
+    | AgdaSearchAbout { query :: Text, sessionId :: Maybe Text, format :: Maybe Text }
+    | AgdaShowModule { moduleName :: Text, sessionId :: Maybe Text, format :: Maybe Text }
+    | AgdaShowConstraints { sessionId :: Maybe Text, format :: Maybe Text }
+    | AgdaWhyInScope { name :: Text, sessionId :: Maybe Text, format :: Maybe Text }
+    | AgdaListPostulates { file :: Text, sessionId :: Maybe Text, format :: Maybe Text }
     deriving (Show, Eq)
 
 -- Resource definitions for exposing Agda file information
@@ -96,6 +96,7 @@ agdaToolDescriptions =
     , ("line", "Line number in the file (1-indexed)")
     , ("column", "Column number in the line (1-indexed)")
     , ("timeout", "Optional timeout in milliseconds for proof search (default: 5000)")
+    , ("sessionId", "Optional session ID (UUID) for multi-agent isolation. Agents with different session IDs get separate REPL instances. Omit or pass null for shared default session (backward compatible)")
     , ("format", "Response format: \"Concise\" (default, human-readable, ~90% smaller) or \"Full\" (complete JSON with ranges for programmatic processing)")
     ]
 

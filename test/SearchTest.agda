@@ -1,30 +1,35 @@
 module SearchTest where
 
--- Import from 1lab for rich type environment
-open import 1Lab.Prelude
-open import 1Lab.Path
-open import 1Lab.Type
+open import Agda.Builtin.Nat
+open import Agda.Builtin.Bool
+open import Agda.Builtin.List
+open import Agda.Builtin.Equality
 
--- Local definitions with interesting types
-example-id : {A : Type} → A → A
+-- Use Set for testing Type searches
+data _⊎_ (A B : Set) : Set where
+  inl : A → A ⊎ B
+  inr : B → A ⊎ B
+
+-- Local definitions with Set in types
+example-id : {A : Set} → A → A
 example-id x = x
 
-example-const : {A B : Type} → A → B → A
+example-const : {A B : Set} → A → B → A
 example-const x y = x
 
-example-compose : {A B C : Type} → (B → C) → (A → B) → (A → C)
+example-compose : {A B C : Set} → (B → C) → (A → B) → (A → C)
 example-compose f g x = f (g x)
 
--- Path-related (from 1lab)
-example-refl : {A : Type} {x : A} → x ≡ x
+-- Equality-related
+example-refl : {A : Set} {x : A} → x ≡ x
 example-refl = refl
 
-example-sym : {A : Type} {x y : A} → x ≡ y → y ≡ x
-example-sym = sym
+example-sym : {A : Set} {x y : A} → x ≡ y → y ≡ x
+example-sym refl = refl
 
--- Sum types
-example-inl : {A B : Type} → A → A ⊎ B
+-- Sum types using our local definition
+example-inl : {A B : Set} → A → A ⊎ B
 example-inl = inl
 
-example-inr : {A B : Type} → B → A ⊎ B
+example-inr : {A B : Set} → B → A ⊎ B
 example-inr = inr

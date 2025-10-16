@@ -18,16 +18,17 @@ main = do
   hSetEncoding stderr utf8
 
   hPutStrLn stderr "Starting Agda MCP Server on http://localhost:3000/mcp"
+  hPutStrLn stderr "Session isolation enabled: pass 'sessionId' parameter for multi-agent support"
 
-  -- Initialize server state
-  stateRef <- initServerState
+  -- Initialize session manager (replaces single server state)
+  sessionManager <- initSessionManager
 
-  -- Define handlers that close over stateRef
+  -- Define handlers that close over sessionManager
   let handleTool :: AgdaTool -> IO Content
-      handleTool = handleAgdaTool stateRef
+      handleTool = handleAgdaToolWithSession sessionManager
 
       handleResource :: URI -> AgdaResource -> IO ResourceContent
-      handleResource = handleAgdaResource stateRef
+      handleResource = handleAgdaResourceWithSession sessionManager
 
       -- Derive MCP handlers using Template Haskell
       tools = $(deriveToolHandlerWithDescription ''AgdaTool 'handleTool agdaToolDescriptions)
@@ -38,7 +39,7 @@ main = do
         McpServerInfo
           { serverName = "Agda MCP Server"
           , serverVersion = "1.0.0"
-          , serverInstructions = "A Model Context Protocol server for interactive Agda development. Provides tools for loading files, working with goals/holes, refining proofs, and exploring scope."
+          , serverInstructions = "A Model Context Protocol server for interactive Agda development. Provides tools for loading files, working with goals/holes, refining proofs, and exploring scope. Supports multi-agent isolation via sessionId parameter."
           }
         McpServerHandlers
           { prompts = Nothing  -- No prompts defined yet
