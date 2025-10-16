@@ -27,12 +27,14 @@ import qualified Data.Vector as V
 import Data.Text (Text)
 import Data.IORef
 import GHC.Generics (Generic)
-import Control.Monad (forM)
+import Control.Monad (forM, void)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Except (catchError)
-import Control.Concurrent (forkIO, ThreadId, threadDelay, killThread)
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, takeMVar, tryPutMVar)
+import Control.Concurrent.Async (race, async, waitCatch, Async)
+import System.Timeout (timeout)
 import System.FilePath (takeDirectory)
 
 -- MCP Server library
@@ -116,7 +118,8 @@ data ServerState = ServerState
   , checkResult :: Maybe CheckResult
   , highlightingInfo :: Maybe JSON.Value     -- Cached highlighting info for goto-def/find-refs
   , commandChan :: Chan CommandWithResponse  -- Channel to send commands to REPL
-  , replThreadId :: Maybe ThreadId           -- Background REPL thread
+  , replAsync :: Maybe (Async ())            -- Background REPL thread handle
+  , shutdownVar :: MVar ()                   -- Shutdown signal for graceful termination
   , currentResponseVar :: IORef (Maybe (MVar JSON.Value))  -- Current response MVar for encoded JSON
   }
 
@@ -125,12 +128,19 @@ data ServerState = ServerState
 -- ============================================================================
 
 -- | Read IOTCM commands from channel, store response MVar, and wrap in Command type
-readCommandFromChan :: IORef (Maybe (MVar JSON.Value)) -> Chan CommandWithResponse -> IO Command
-readCommandFromChan responseVarRef chan = do
-  CommandWithResponse iotcm responseVar <- readChan chan
-  -- Store the response MVar so callback can use it
-  writeIORef responseVarRef (Just responseVar)
-  return $ Command iotcm
+-- Uses race to allow graceful shutdown when shutdownVar is signaled
+readCommandFromChan :: IORef (Maybe (MVar JSON.Value)) -> MVar () -> Chan CommandWithResponse -> IO Command
+readCommandFromChan responseVarRef shutdownVar chan = do
+  result <- race (takeMVar shutdownVar) (readChan chan)
+  case result of
+    Left () -> do
+      -- Shutdown signal received, exit REPL loop gracefully
+      putStrLn "REPL received shutdown signal, exiting gracefully"
+      return Done
+    Right (CommandWithResponse iotcm responseVar) -> do
+      -- Store the response MVar so callback can use it
+      writeIORef responseVarRef (Just responseVar)
+      return $ Command iotcm
 
 -- | Callback for capturing Agda responses and routing to waiting handlers
 -- Pattern match on specific response types we care about
@@ -721,22 +731,23 @@ initServerState :: IO (IORef ServerState)
 initServerState = do
   chan <- newChan
   responseVarRef <- newIORef Nothing
-  stateRef <- newIORef (ServerState Nothing Nothing Nothing chan Nothing responseVarRef)
+  shutdownVar <- newEmptyMVar
+  stateRef <- newIORef (ServerState Nothing Nothing Nothing chan Nothing shutdownVar responseVarRef)
 
-  -- Start persistent REPL in background thread
-  threadId <- forkIO $ do
+  -- Start persistent REPL in background thread using async
+  asyncHandle <- async $ do
     putStrLn "Starting persistent Agda REPL thread..."
     result <- runTCMTop $ Repl.mcpRepl
-      (mcpCallback stateRef responseVarRef)     -- Response callback with state and response refs
-      (readCommandFromChan responseVarRef chan) -- Command source with IORef
-      (return ())                               -- No special setup
+      (mcpCallback stateRef responseVarRef)          -- Response callback with state and response refs
+      (readCommandFromChan responseVarRef shutdownVar chan) -- Command source with shutdown support
+      (return ())                                    -- No special setup
     case result of
       Left err -> putStrLn $ "REPL error: " ++ show err
       Right _ -> putStrLn "REPL exited normally"
 
-  -- Update state with thread ID
-  modifyIORef stateRef (\s -> s { replThreadId = Just threadId })
-  putStrLn $ "Persistent REPL started with thread ID: " ++ show threadId
+  -- Update state with async handle
+  modifyIORef stateRef (\s -> s { replAsync = Just asyncHandle })
+  putStrLn "Persistent REPL started"
   pure stateRef
 
 -- MCP Tool Handler - routes commands through persistent REPL
@@ -855,13 +866,20 @@ handleAgdaResource stateRef uri resource = do
 initSessionManager :: IO (SessionManager.SessionManager ServerState)
 initSessionManager = do
   -- Create session manager with initServerState as the state initializer
-  -- and a cleanup function that kills the REPL thread
+  -- and a cleanup function that gracefully shuts down the REPL thread
   let cleanup stateRef = do
         state <- readIORef stateRef
-        case replThreadId state of
-          Just tid -> do
-            putStrLn $ "Cleaning up REPL thread " ++ show tid
-            killThread tid
+        case replAsync state of
+          Just asyncHandle -> do
+            putStrLn "Gracefully shutting down REPL thread..."
+            -- Signal shutdown via MVar (tryPutMVar won't block if already signaled)
+            void $ tryPutMVar (shutdownVar state) ()
+            -- Wait for thread to actually exit (max 5 seconds)
+            result <- timeout 5000000 $ waitCatch asyncHandle
+            case result of
+              Nothing -> putStrLn "Warning: REPL thread did not exit within 5 seconds"
+              Just (Left ex) -> putStrLn $ "REPL thread exited with exception: " ++ show ex
+              Just (Right ()) -> putStrLn "REPL thread shutdown complete"
           Nothing -> return ()
 
   SessionManager.createSessionManager initServerState (Just cleanup)

@@ -16,7 +16,10 @@ import Data.IORef
 import System.FilePath ((</>))
 import System.Directory (getCurrentDirectory)
 import Control.Exception (try, SomeException, bracket)
-import Control.Concurrent (killThread)
+import Control.Concurrent.MVar (tryPutMVar)
+import Control.Concurrent.Async (waitCatch, Async)
+import Control.Monad (void)
+import System.Timeout (timeout)
 import System.IO (hPutStrLn, stderr)
 import System.IO.Unsafe (unsafePerformIO)
 
@@ -43,23 +46,27 @@ assertEqual :: (Eq a, Show a) => String -> a -> a -> IO ()
 assertEqual msg expected actual =
   if expected == actual
     then pure ()
-    else error $ msg ++ ": expected " ++ show expected ++ " but got " ++ show actual
+    else fail $ msg ++ ": expected " ++ show expected ++ " but got " ++ show actual
 
 assertBool :: String -> Bool -> IO ()
 assertBool msg condition =
   if condition
     then pure ()
-    else error msg
+    else fail msg
 
 assertFailure :: String -> IO ()
-assertFailure = error
+assertFailure = fail
 
--- | Cleanup function to kill REPL thread and free resources
+-- | Cleanup function to gracefully shut down REPL thread
 cleanupServerState :: IORef ServerState -> IO ()
 cleanupServerState stateRef = do
   state <- readIORef stateRef
-  case replThreadId state of
-    Just tid -> killThread tid
+  case replAsync state of
+    Just asyncHandle -> do
+      -- Signal shutdown via MVar (tryPutMVar won't block if already signaled)
+      void $ tryPutMVar (shutdownVar state) ()
+      -- Wait for thread to actually exit (max 2 seconds for tests)
+      void $ timeout 2000000 $ waitCatch asyncHandle
     Nothing -> return ()
 
 -- | Helper to run a tool and get the response as JSON (forces Full format)
@@ -72,8 +79,8 @@ runTool stateRef tool = do
     MCP.ContentText txt -> do
       case JSON.decode (LBS.fromStrict $ TE.encodeUtf8 txt) of
         Just val -> pure val
-        Nothing -> error $ "Failed to parse JSON response: " ++ T.unpack txt
-    _ -> error "Expected ContentText response"
+        Nothing -> fail $ "Failed to parse JSON response: " ++ T.unpack txt
+    _ -> fail "Expected ContentText response"
 
 -- | Set format on a tool (preserves sessionId) - simplified for GetGoals only
 setFormat :: Types.AgdaTool -> Maybe Text -> Types.AgdaTool

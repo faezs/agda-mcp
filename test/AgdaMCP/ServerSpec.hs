@@ -16,7 +16,10 @@ import Data.IORef
 import System.FilePath ((</>))
 import System.Directory (getCurrentDirectory)
 import Control.Exception (try, SomeException)
-import Control.Concurrent (killThread)
+import Control.Concurrent.MVar (tryPutMVar)
+import Control.Concurrent.Async (waitCatch, Async)
+import Control.Monad (void)
+import System.Timeout (timeout)
 
 import AgdaMCP.Server
 import qualified AgdaMCP.Types as Types
@@ -42,16 +45,16 @@ assertEqual :: (Eq a, Show a) => String -> a -> a -> IO ()
 assertEqual msg expected actual =
   if expected == actual
     then pure ()
-    else error $ msg ++ ": expected " ++ show expected ++ " but got " ++ show actual
+    else fail $ msg ++ ": expected " ++ show expected ++ " but got " ++ show actual
 
 assertBool :: String -> Bool -> IO ()
 assertBool msg condition =
   if condition
     then pure ()
-    else error msg
+    else fail msg
 
 assertFailure :: String -> IO ()
-assertFailure = error
+assertFailure = fail
 
 -- | Helper to run a tool and get the response as JSON (forces Full format)
 runTool :: IORef ServerState -> Types.AgdaTool -> IO JSON.Value
@@ -63,8 +66,8 @@ runTool stateRef tool = do
     MCP.ContentText txt -> do
       case JSON.decode (LBS.fromStrict $ TE.encodeUtf8 txt) of
         Just val -> pure val
-        Nothing -> error $ "Failed to parse JSON response: " ++ T.unpack txt
-    _ -> error "Expected ContentText response"
+        Nothing -> fail $ "Failed to parse JSON response: " ++ T.unpack txt
+    _ -> fail "Expected ContentText response"
 
 -- | Helper to run a tool and get concise text response
 runToolConcise :: IORef ServerState -> Types.AgdaTool -> IO Text
@@ -74,7 +77,7 @@ runToolConcise stateRef tool = do
   result <- handleAgdaTool stateRef toolWithConciseFormat
   case result of
     MCP.ContentText txt -> pure txt
-    _ -> error "Expected ContentText response"
+    _ -> fail "Expected ContentText response"
 
 -- | Set format on a tool (preserves sessionId)
 setFormat :: Types.AgdaTool -> Maybe Text -> Types.AgdaTool
@@ -113,12 +116,16 @@ getField _ _ = Nothing
 -- Resource Management
 -- ============================================================================
 
--- | Cleanup function to kill REPL thread and free resources
+-- | Cleanup function to gracefully shut down REPL thread
 cleanupServerState :: IORef ServerState -> IO ()
 cleanupServerState stateRef = do
   state <- readIORef stateRef
-  case replThreadId state of
-    Just tid -> killThread tid
+  case replAsync state of
+    Just asyncHandle -> do
+      -- Signal shutdown via MVar (tryPutMVar won't block if already signaled)
+      void $ tryPutMVar (shutdownVar state) ()
+      -- Wait for thread to actually exit (max 2 seconds for tests)
+      void $ timeout 2000000 $ waitCatch asyncHandle
     Nothing -> return ()
 
 -- | Create a fresh server state resource with proper cleanup
@@ -201,8 +208,8 @@ searchTestFile = do
 
 -- | Tests for agda_load
 loadTests :: TestTree
-loadTests = withFreshServer $ \getState -> testGroup "agda_load"
-  [ simpleTestCase "loads file successfully and returns goals" $ do
+loadTests = testGroup "agda_load"
+  [ withFreshServer $ \getState -> simpleTestCase "loads file successfully and returns goals" $ do
       stateRef <- getState
       file <- exampleFile
       let tool = Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Nothing, Types.format = Nothing }
@@ -224,7 +231,7 @@ loadTests = withFreshServer $ \getState -> testGroup "agda_load"
           assertEqual "Should have 5 goals" 5 (length goals)
         _ -> assertFailure "Should have visibleGoals array"
 
-  , simpleTestCase "fails to load non-existent file" $ do
+  , withFreshServer $ \getState -> simpleTestCase "fails to load non-existent file" $ do
       stateRef <- getState
       let tool = Types.AgdaLoad { Types.file = "/non/existent/file.agda", Types.sessionId = Nothing, Types.format = Nothing }
       response <- runTool stateRef tool
@@ -256,8 +263,8 @@ getGoalsTests = withLoadedServer $ \getState -> testGroup "agda_get_goals"
 
 -- | Tests for agda_get_goal_type
 getGoalTypeTests :: TestTree
-getGoalTypeTests = withLoadedServer $ \getState -> testGroup "agda_get_goal_type"
-  [ simpleTestCase "gets type of goal 0" $ do
+getGoalTypeTests = testGroup "agda_get_goal_type"
+  [ withLoadedServer $ \getState -> simpleTestCase "gets type of goal 0" $ do
       stateRef <- getState
       let tool = Types.AgdaGetGoalType { Types.goalId = 0, Types.sessionId = Nothing, Types.format = Nothing }
       response <- runTool stateRef tool
@@ -266,7 +273,7 @@ getGoalTypeTests = withLoadedServer $ \getState -> testGroup "agda_get_goal_type
       let kind = getField "kind" response
       assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
 
-  , simpleTestCase "fails on invalid goal ID" $ do
+  , withLoadedServer $ \getState -> simpleTestCase "fails on invalid goal ID" $ do
       stateRef <- getState
       let tool = Types.AgdaGetGoalType { Types.goalId = 999, Types.sessionId = Nothing, Types.format = Nothing }
       response <- runTool stateRef tool
@@ -277,8 +284,8 @@ getGoalTypeTests = withLoadedServer $ \getState -> testGroup "agda_get_goal_type
   ]
 
 getGoalTypeImplicitsTests :: TestTree
-getGoalTypeImplicitsTests = withLoadedServer $ \getState -> testGroup "agda_get_goal_type_implicits"
-  [ simpleTestCase "gets type of goal 0 with implicits" $ do
+getGoalTypeImplicitsTests = testGroup "agda_get_goal_type_implicits"
+  [ withLoadedServer $ \getState -> simpleTestCase "gets type of goal 0 with implicits" $ do
       stateRef <- getState
       let tool = Types.AgdaGetGoalTypeImplicits { Types.goalId = 0, Types.sessionId = Nothing, Types.format = Nothing }
       response <- runTool stateRef tool
@@ -287,7 +294,7 @@ getGoalTypeImplicitsTests = withLoadedServer $ \getState -> testGroup "agda_get_
       let kind = getField "kind" response
       assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
 
-  , simpleTestCase "fails on invalid goal ID" $ do
+  , withLoadedServer $ \getState -> simpleTestCase "fails on invalid goal ID" $ do
       stateRef <- getState
       let tool = Types.AgdaGetGoalTypeImplicits { Types.goalId = 999, Types.sessionId = Nothing, Types.format = Nothing }
       response <- runTool stateRef tool
@@ -326,8 +333,8 @@ getContextImplicitsTests = withLoadedServer $ \getState -> testGroup "agda_get_c
 
 -- | Tests for agda_give
 giveTests :: TestTree
-giveTests = withLoadedServer $ \getState -> testGroup "agda_give"
-  [ simpleTestCase "successful give returns GiveAction" $ do
+giveTests = testGroup "agda_give"
+  [ withLoadedServer $ \getState -> simpleTestCase "successful give returns GiveAction" $ do
       stateRef <- getState
       let tool = Types.AgdaGive { Types.goalId = 0, Types.expression = "n", Types.sessionId = Nothing, Types.format = Nothing }
       response <- runTool stateRef tool
@@ -338,7 +345,7 @@ giveTests = withLoadedServer $ \getState -> testGroup "agda_give"
       let giveResult = getField "giveResult" response
       assertBool "Should have giveResult" (giveResult /= Nothing)
 
-  , simpleTestCase "failed give returns error" $ do
+  , withLoadedServer $ \getState -> simpleTestCase "failed give returns error" $ do
       stateRef <- getState
       -- Use a completely invalid expression to trigger a parse/scope error
       let tool = Types.AgdaGive { Types.goalId = 0, Types.expression = "nonExistentName123", Types.sessionId = Nothing, Types.format = Nothing }
@@ -720,8 +727,8 @@ showConstraintsTests = withLoadedServer $ \getState -> testGroup "agda_show_cons
 
 -- | Tests for agda_why_in_scope
 whyInScopeTests :: TestTree
-whyInScopeTests = withLoadedServer $ \getState -> testGroup "agda_why_in_scope"
-  [ simpleTestCase "looks up existing name" $ do
+whyInScopeTests = testGroup "agda_why_in_scope"
+  [ withLoadedServer $ \getState -> simpleTestCase "looks up existing name" $ do
       stateRef <- getState
       let tool = Types.AgdaWhyInScope { Types.name = "suc", Types.sessionId = Nothing, Types.format = Nothing }
       response <- runTool stateRef tool
@@ -729,7 +736,7 @@ whyInScopeTests = withLoadedServer $ \getState -> testGroup "agda_why_in_scope"
       let kind = getField "kind" response
       assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
 
-  , simpleTestCase "looks up non-existent name" $ do
+  , withLoadedServer $ \getState -> simpleTestCase "looks up non-existent name" $ do
       stateRef <- getState
       let tool = Types.AgdaWhyInScope { Types.name = "nonExistentName123", Types.sessionId = Nothing, Types.format = Nothing }
       response <- runTool stateRef tool
