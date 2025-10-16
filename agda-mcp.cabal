@@ -17,6 +17,7 @@ library
     AgdaMCP.Repl
     AgdaMCP.Format
     AgdaMCP.SessionManager
+    AgdaMCP.FileEdit
   build-depends:
     base >= 4.14 && < 5,
     async >= 2.2,
@@ -61,6 +62,7 @@ test-suite agda-mcp-tests
   other-modules:
     AgdaMCP.ServerSpec
     AgdaMCP.MultiAgentSpec
+    AgdaMCP.EditPersistenceSpec
   build-depends:
     base >= 4.14 && < 5,
     agda-mcp,

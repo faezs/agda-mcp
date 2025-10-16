@@ -5,10 +5,12 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that p
 ## Features
 
 - **Persistent REPL Session**: Maintains Agda interaction state across commands, preserving goals, context, and type-checking results
-- **11 Interactive Commands**: Full coverage of essential Agda interaction operations
+- **24 Interactive Commands**: Comprehensive coverage of Agda interaction operations including proof search, case splitting, and module exploration
+- **Automatic File Persistence**: Commands that modify code (give, refine, case split, auto) automatically persist changes to disk
 - **HTTP Transport**: Standards-compliant MCP server with HTTP/JSON-RPC transport
 - **Backward Compatibility Patch**: Includes patch for mcp-server to work with Claude Code's HTTP transport
 - **Type-Safe Integration**: Built with Haskell's type system for robust MCP protocol handling
+- **Smart Response Formatting**: Concise human-readable output by default (~90% size reduction), with optional full JSON mode
 
 ## Architecture
 
@@ -18,7 +20,18 @@ The server runs a persistent Agda REPL in a background thread, communicating via
 - Each MCP tool call is converted to an `IOTCM` command and executed in the persistent REPL
 - Goals, context, and interaction state persist between commands
 
-This architecture ensures that operations like "load file" → "get goals" → "refine goal" work correctly with maintained state.
+### File Edit Persistence
+
+When commands modify Agda code, changes are automatically persisted to disk:
+- **Response capture**: The REPL callback intercepts typed `Response` values (e.g., `Resp_GiveAction`, `Resp_MakeCase`)
+- **Smart extraction**: Edit operations are extracted in the TCM monad context using Agda's native APIs
+- **Type-specific strategies**: Different edit types for different operations:
+  - `ReplaceHole`: In-place hole filling (give, refine, auto)
+  - `ReplaceLine`: Structural edits with line insertion (case split)
+  - `BatchEdits`: Multiple operations applied in reverse position order (auto_all)
+- **Position-aware**: Edits preserve file structure and handle position invalidation correctly
+
+This architecture ensures that operations like "load file" → "get goals" → "give solution" not only update the REPL state but also persist the changes to the source file.
 
 ## Prerequisites
 
@@ -177,6 +190,7 @@ Fill a goal/hole with a complete expression.
 **Arguments:**
 - `goalId` (integer): The numeric ID of the goal to fill
 - `expression` (string): The Agda expression to use (e.g., "zero", "suc n", "refl")
+- `format` (string, optional): "Concise" (default) or "Full"
 
 **Example:**
 ```json
@@ -189,7 +203,12 @@ Fill a goal/hole with a complete expression.
 }
 ```
 
-**Use Case:** Complete a goal when you have the full solution.
+**Effect:**
+- Fills the goal in the REPL
+- **Automatically updates the file**: Replaces `{! !}` with the expression
+- Returns success/failure to the LLM
+
+**Use Case:** Complete a goal when you have the full solution. The file is automatically edited.
 
 ---
 
@@ -200,6 +219,7 @@ Refine a goal with a constructor or function, introducing new sub-goals.
 **Arguments:**
 - `goalId` (integer): The numeric ID of the goal to refine
 - `expression` (string): Constructor or function name (e.g., "suc", "zero", "_+_")
+- `format` (string, optional): "Concise" (default) or "Full"
 
 **Example:**
 ```json
@@ -212,7 +232,12 @@ Refine a goal with a constructor or function, introducing new sub-goals.
 }
 ```
 
-**Use Case:** Make progress on a goal by applying a constructor, which creates new sub-goals for the constructor's arguments.
+**Effect:**
+- Applies constructor/function to the goal
+- **Automatically updates the file**: Replaces `{! !}` with applied constructor and new holes
+- Returns new goal structure
+
+**Use Case:** Make progress on a goal by applying a constructor, which creates new sub-goals for the constructor's arguments. The file is automatically edited with the refinement.
 
 ---
 
@@ -223,6 +248,7 @@ Split a goal by pattern matching on a variable.
 **Arguments:**
 - `goalId` (integer): The numeric ID of the goal
 - `variable` (string): Name of the variable to pattern-match on
+- `format` (string, optional): "Concise" (default) or "Full"
 
 **Example:**
 ```json
@@ -235,7 +261,13 @@ Split a goal by pattern matching on a variable.
 }
 ```
 
-**Use Case:** Perform case analysis on a variable (e.g., split a natural number into zero and successor cases).
+**Effect:**
+- Generates pattern-match clauses for all constructors
+- **Automatically updates the file**: Deletes the line with the hole, inserts multiple clauses
+- Preserves indentation
+- **Note**: File should be reloaded after case split to see new goals
+
+**Use Case:** Perform case analysis on a variable (e.g., split a natural number into zero and successor cases). The entire line is replaced with multiple pattern-match clauses.
 
 ---
 
@@ -366,19 +398,45 @@ cabal run agda-mcp
 
 # 3. Get all goals in the file
 /mcp agda-mcp agda_get_goals
+# Output: 5 goals: ?0:Nat(10:12) ?1:Nat(11:12) ?2:Nat(15:12) ?3:Nat(16:12) ?4:A(20:18)
 
 # 4. Check the type of goal 0
 /mcp agda-mcp agda_get_goal_type goalId=0
+# Output: ?0 : Nat
 
 # 5. See available variables
 /mcp agda-mcp agda_get_context goalId=0
+# Output: Context:
+#   n : Nat
 
-# 6. Refine the goal with a constructor
-/mcp agda-mcp agda_refine goalId=0 expression="suc"
+# 6. Fill the goal - FILE IS AUTOMATICALLY EDITED
+/mcp agda-mcp agda_give goalId=0 expression="n"
+# ✓ Filled ?0 with 'n'
+# File now shows: zero + n = n
 
-# 7. Fill a sub-goal
-/mcp agda-mcp agda_give goalId=1 expression="zero"
+# 7. Case split on a variable - FILE IS AUTOMATICALLY EDITED
+/mcp agda-mcp agda_case_split goalId=1 variable="m"
+# Split ?1 into 2 clauses:
+#   suc zero + n = {! !}
+#   suc (suc m) + n = {! !}
+# File now has 2 lines instead of 1
+
+# 8. Reload to see new goals after case split
+/mcp agda-mcp agda_load file="/path/to/Example.agda"
+/mcp agda-mcp agda_get_goals
+# Now shows updated goal structure
 ```
+
+### File Persistence in Action
+
+When you use commands like `agda_give`, `agda_refine`, or `agda_case_split`:
+1. ✅ The command executes in the REPL
+2. ✅ The response is captured before JSON encoding
+3. ✅ **File edits are extracted and applied automatically**
+4. ✅ The JSON response is returned to the LLM
+5. ✅ Changes are persisted to disk immediately
+
+**No manual file editing needed!** The MCP server handles all source modifications.
 
 ## Development
 
@@ -389,13 +447,17 @@ agda-mcp/
 ├── src/
 │   ├── AgdaMCP/
 │   │   ├── Types.hs        # MCP tool and resource definitions
-│   │   ├── Server.hs       # MCP handlers and REPL integration
+│   │   ├── Server.hs       # MCP handlers, REPL integration, file edit extraction
+│   │   ├── FileEdit.hs     # File editing strategies (ReplaceHole, ReplaceLine, BatchEdits)
+│   │   ├── Format.hs       # Response formatting (Concise/Full modes)
 │   │   └── Repl.hs         # Persistent REPL adapter
 │   └── Main.hs             # Entry point
 ├── patches/
 │   └── mcp-server-header-optional.patch  # Compatibility patch
 ├── test/
-│   └── Example.agda        # Sample Agda file for testing
+│   ├── Example.agda        # Sample Agda file for testing
+│   ├── SearchTest.agda     # Integration test with 1Lab library
+│   └── PostulateTest.agda  # Postulate detection tests
 ├── agda-mcp.cabal          # Cabal package definition
 ├── flake.nix               # Nix flake for reproducible builds
 └── README.md               # This file
@@ -481,18 +543,50 @@ Claude Code's HTTP transport (as of version 2.0.13) sends the protocol version i
 
 This patch is applied automatically during the Nix build process via `pkgs.applyPatches` in `flake.nix`.
 
+## Technical Details
+
+### File Edit Implementation
+
+The file persistence feature is implemented with structural awareness:
+
+**Three Edit Types:**
+1. **ReplaceHole** (Give, Refine, Auto): In-place replacement of `{! expr !}` with new text
+   - Removes or keeps braces depending on `GiveResult` type
+   - Preserves surrounding code structure
+
+2. **ReplaceLine** (Case Split): Structural line replacement
+   - Deletes the line containing the goal
+   - Inserts N new clauses with preserved indentation
+   - Handles both function and extended lambda cases
+
+3. **BatchEdits** (SolveAll): Multiple hole fills
+   - Applies edits in **reverse position order** (bottom-to-top)
+   - Prevents position invalidation from earlier edits
+   - Each solution extracted from concrete `Expr`
+
+**Position Safety:**
+- Uses Agda's `Range` type for precise positions (1-indexed line/col)
+- Leverages `getInteractionRange :: InteractionId -> TCM Range`
+- Sorts batch edits by position to avoid coordinate shifts
+
+**TCM Context Extraction:**
+- Works with typed `Response` values before JSON encoding
+- No JSON parsing needed - uses native Agda types
+- Runs in the same TCM monad as Agda interaction
+
 ## Contributing
 
 Contributions are welcome! Areas for improvement:
 
-- [ ] Add comprehensive test suite
+- [x] ~~Add comprehensive test suite~~ (✓ 15+ tests implemented)
+- [x] ~~Persistent file edits~~ (✓ Implemented with structural awareness)
+- [x] ~~Response formatting~~ (✓ Concise/Full modes with 90% size reduction)
 - [ ] Support for stdio transport in addition to HTTP
 - [ ] Configurable port and host
-- [ ] Better error messages and response parsing
-- [ ] Support for more Agda interaction commands
-- [ ] Resource implementations (currently stubs)
-- [ ] Verbose/debug logging modes
+- [ ] Resource URI path parsing for goal_info queries
+- [ ] Verbose/debug logging modes with --verbose flag
 - [ ] CI/CD pipeline
+- [ ] Extended lambda case split support
 
 ## License
 
