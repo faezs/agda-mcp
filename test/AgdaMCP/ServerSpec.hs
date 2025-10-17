@@ -26,6 +26,7 @@ import qualified AgdaMCP.Types as Types
 import qualified AgdaMCP.SessionManager as SessionManager
 import qualified MCP.Server as MCP
 import qualified AgdaMCP.MultiAgentSpec as MultiAgent
+import AgdaMCP.TestUtils (withTempTestFile)
 
 -- | Simple test case type
 data SimpleTest = SimpleTest String (IO ())
@@ -150,7 +151,10 @@ tests = testGroup "AgdaMCP.Server Tests"
   , MultiAgent.tests
   ]
 
--- Test data
+-- ============================================================================
+-- Test Data
+-- ============================================================================
+
 exampleFile :: IO FilePath
 exampleFile = do
   cwd <- getCurrentDirectory
@@ -320,38 +324,38 @@ giveTests :: TestTree
 giveTests = withSessionManager $ \getManager -> testGroup "agda_give"
   [ simpleTestCase "successful give returns GiveAction" $ do
       manager <- getManager
-      file <- exampleFile
-      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-give-success", Types.format = Nothing })
+      withTempTestFile "Example.agda" $ \file -> do
+        _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-give-success", Types.format = Nothing })
 
-      let tool = Types.AgdaGive { Types.goalId = 0, Types.expression = "n", Types.sessionId = Just "test-give-success", Types.format = Nothing }
-      response <- runTool manager tool
+        let tool = Types.AgdaGive { Types.goalId = 0, Types.expression = "n", Types.sessionId = Just "test-give-success", Types.format = Nothing }
+        response <- runTool manager tool
 
-      let kind = getField "kind" response
-      assertEqual "Should be GiveAction" (Just (JSON.String "GiveAction")) kind
+        let kind = getField "kind" response
+        assertEqual "Should be GiveAction" (Just (JSON.String "GiveAction")) kind
 
-      let giveResult = getField "giveResult" response
-      assertBool "Should have giveResult" (giveResult /= Nothing)
+        let giveResult = getField "giveResult" response
+        assertBool "Should have giveResult" (giveResult /= Nothing)
 
   , simpleTestCase "failed give returns error" $ do
       manager <- getManager
-      file <- exampleFile
-      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-give-error", Types.format = Nothing })
+      withTempTestFile "Example.agda" $ \file -> do
+        _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-give-error", Types.format = Nothing })
 
-      -- Use a completely invalid expression to trigger a parse/scope error
-      let tool = Types.AgdaGive { Types.goalId = 0, Types.expression = "nonExistentName123", Types.sessionId = Just "test-give-error", Types.format = Nothing }
-      response <- runTool manager tool
+        -- Use a completely invalid expression to trigger a parse/scope error
+        let tool = Types.AgdaGive { Types.goalId = 0, Types.expression = "nonExistentName123", Types.sessionId = Just "test-give-error", Types.format = Nothing }
+        response <- runTool manager tool
 
-      let kind = getField "kind" response
-      -- Should be DisplayInfo with error (scope error for undefined name)
-      assertEqual "Should be DisplayInfo with error" (Just (JSON.String "DisplayInfo")) kind
+        let kind = getField "kind" response
+        -- Should be DisplayInfo with error (scope error for undefined name)
+        assertEqual "Should be DisplayInfo with error" (Just (JSON.String "DisplayInfo")) kind
 
-      -- Check for error in info
-      let info = getField "info" response
-      case info of
-        Just (JSON.Object obj) -> do
-          let infoKind = JSON.KeyMap.lookup (JSON.Key.fromText "kind") obj
-          assertEqual "Info kind should be Error" (Just (JSON.String "Error")) infoKind
-        _ -> assertFailure "Should have info object"
+        -- Check for error in info
+        let info = getField "info" response
+        case info of
+          Just (JSON.Object obj) -> do
+            let infoKind = JSON.KeyMap.lookup (JSON.Key.fromText "kind") obj
+            assertEqual "Info kind should be Error" (Just (JSON.String "Error")) infoKind
+          _ -> assertFailure "Should have info object"
   ]
 
 -- | Tests for agda_refine
@@ -359,16 +363,16 @@ refineTests :: TestTree
 refineTests = withSessionManager $ \getManager -> testGroup "agda_refine"
   [ simpleTestCase "refines goal with constructor" $ do
       manager <- getManager
-      file <- exampleFile
-      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-refine", Types.format = Nothing })
+      withTempTestFile "Example.agda" $ \file -> do
+        _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-refine", Types.format = Nothing })
 
-      let tool = Types.AgdaRefine { Types.goalId = 1, Types.expression = "suc", Types.sessionId = Just "test-refine", Types.format = Nothing }
-      response <- runTool manager tool
+        let tool = Types.AgdaRefine { Types.goalId = 1, Types.expression = "suc", Types.sessionId = Just "test-refine", Types.format = Nothing }
+        response <- runTool manager tool
 
-      -- Refine should return GiveAction
-      let kind = getField "kind" response
-      assertBool "Should be GiveAction or DisplayInfo"
-        (kind == Just (JSON.String "GiveAction") || kind == Just (JSON.String "DisplayInfo"))
+        -- Refine should return GiveAction
+        let kind = getField "kind" response
+        assertBool "Should be GiveAction or DisplayInfo"
+          (kind == Just (JSON.String "GiveAction") || kind == Just (JSON.String "DisplayInfo"))
   ]
 
 -- | Tests for agda_case_split
@@ -376,16 +380,16 @@ caseSplitTests :: TestTree
 caseSplitTests = withSessionManager $ \getManager -> testGroup "agda_case_split"
   [ simpleTestCase "splits on variable n" $ do
       manager <- getManager
-      file <- exampleFile
-      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-case-split", Types.format = Nothing })
+      withTempTestFile "Example.agda" $ \file -> do
+        _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-case-split", Types.format = Nothing })
 
-      let tool = Types.AgdaCaseSplit { Types.goalId = 0, Types.variable = "n", Types.sessionId = Just "test-case-split", Types.format = Nothing }
-      response <- runTool manager tool
+        let tool = Types.AgdaCaseSplit { Types.goalId = 0, Types.variable = "n", Types.sessionId = Just "test-case-split", Types.format = Nothing }
+        response <- runTool manager tool
 
-      -- Case split returns MakeCase
-      let kind = getField "kind" response
-      assertBool "Should be MakeCase or DisplayInfo"
-        (kind == Just (JSON.String "MakeCase") || kind == Just (JSON.String "DisplayInfo"))
+        -- Case split returns MakeCase
+        let kind = getField "kind" response
+        assertBool "Should be MakeCase or DisplayInfo"
+          (kind == Just (JSON.String "MakeCase") || kind == Just (JSON.String "DisplayInfo"))
   ]
 
 -- | Tests for agda_compute
@@ -439,95 +443,95 @@ autoTests :: TestTree
 autoTests = withSessionManager $ \getManager -> testGroup "agda_auto"
   [ simpleTestCase "attempts auto on simple goal" $ do
       manager <- getManager
-      file <- exampleFile
-      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-auto-simple", Types.format = Nothing })
+      withTempTestFile "Example.agda" $ \file -> do
+        _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-auto-simple", Types.format = Nothing })
 
-      let tool = Types.AgdaAuto { Types.goalId = 0, Types.timeout = Nothing, Types.sessionId = Just "test-auto-simple", Types.format = Nothing }
-      response <- runTool manager tool
+        let tool = Types.AgdaAuto { Types.goalId = 0, Types.timeout = Nothing, Types.sessionId = Just "test-auto-simple", Types.format = Nothing }
+        response <- runTool manager tool
 
-      -- Auto may succeed (GiveAction) or fail (DisplayInfo with error/auto result)
-      let kind = getField "kind" response
-      assertBool "Should be DisplayInfo or GiveAction (success!)"
-        (kind == Just (JSON.String "DisplayInfo") || kind == Just (JSON.String "GiveAction"))
+        -- Auto may succeed (GiveAction) or fail (DisplayInfo with error/auto result)
+        let kind = getField "kind" response
+        assertBool "Should be DisplayInfo or GiveAction (success!)"
+          (kind == Just (JSON.String "DisplayInfo") || kind == Just (JSON.String "GiveAction"))
 
   , simpleTestCase "respects timeout parameter" $ do
       manager <- getManager
-      file <- exampleFile
-      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-auto-timeout", Types.format = Nothing })
+      withTempTestFile "Example.agda" $ \file -> do
+        _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-auto-timeout", Types.format = Nothing })
 
-      let tool = Types.AgdaAuto { Types.goalId = 0, Types.timeout = Just 1000, Types.sessionId = Just "test-auto-timeout", Types.format = Nothing }
-      response <- runTool manager tool
+        let tool = Types.AgdaAuto { Types.goalId = 0, Types.timeout = Just 1000, Types.sessionId = Just "test-auto-timeout", Types.format = Nothing }
+        response <- runTool manager tool
 
-      -- Should complete within timeout
-      let kind = getField "kind" response
-      assertBool "Should return DisplayInfo or GiveAction"
-        (kind == Just (JSON.String "DisplayInfo") || kind == Just (JSON.String "GiveAction"))
+        -- Should complete within timeout
+        let kind = getField "kind" response
+        assertBool "Should return DisplayInfo or GiveAction"
+          (kind == Just (JSON.String "DisplayInfo") || kind == Just (JSON.String "GiveAction"))
   ]
 
 autoAllTests :: TestTree
 autoAllTests = withSessionManager $ \getManager -> testGroup "agda_auto_all"
   [ simpleTestCase "attempts auto on all goals" $ do
       manager <- getManager
-      file <- exampleFile
-      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-auto-all", Types.format = Nothing })
+      withTempTestFile "Example.agda" $ \file -> do
+        _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-auto-all", Types.format = Nothing })
 
-      let tool = Types.AgdaAutoAll { Types.timeout = Nothing, Types.sessionId = Just "test-auto-all", Types.format = Nothing }
-      response <- runTool manager tool
+        let tool = Types.AgdaAutoAll { Types.timeout = Nothing, Types.sessionId = Just "test-auto-all", Types.format = Nothing }
+        response <- runTool manager tool
 
-      -- Should return SolveAll, GiveAction, or DisplayInfo
-      let kind = getField "kind" response
-      assertBool "Should be SolveAll, GiveAction, or DisplayInfo"
-        (kind == Just (JSON.String "SolveAll") ||
-         kind == Just (JSON.String "GiveAction") ||
-         kind == Just (JSON.String "DisplayInfo"))
+        -- Should return SolveAll, GiveAction, or DisplayInfo
+        let kind = getField "kind" response
+        assertBool "Should be SolveAll, GiveAction, or DisplayInfo"
+          (kind == Just (JSON.String "SolveAll") ||
+           kind == Just (JSON.String "GiveAction") ||
+           kind == Just (JSON.String "DisplayInfo"))
 
   , simpleTestCase "respects timeout parameter" $ do
       manager <- getManager
-      file <- exampleFile
-      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-auto-all-timeout", Types.format = Nothing })
+      withTempTestFile "Example.agda" $ \file -> do
+        _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-auto-all-timeout", Types.format = Nothing })
 
-      let tool = Types.AgdaAutoAll { Types.timeout = Just 2000, Types.sessionId = Just "test-auto-all-timeout", Types.format = Nothing }
-      response <- runTool manager tool
+        let tool = Types.AgdaAutoAll { Types.timeout = Just 2000, Types.sessionId = Just "test-auto-all-timeout", Types.format = Nothing }
+        response <- runTool manager tool
 
-      -- Should complete within timeout
-      let kind = getField "kind" response
-      assertBool "Should return SolveAll, GiveAction, or DisplayInfo"
-        (kind == Just (JSON.String "SolveAll") ||
-         kind == Just (JSON.String "GiveAction") ||
-         kind == Just (JSON.String "DisplayInfo"))
+        -- Should complete within timeout
+        let kind = getField "kind" response
+        assertBool "Should return SolveAll, GiveAction, or DisplayInfo"
+          (kind == Just (JSON.String "SolveAll") ||
+           kind == Just (JSON.String "GiveAction") ||
+           kind == Just (JSON.String "DisplayInfo"))
   ]
 
 solveOneTests :: TestTree
 solveOneTests = withSessionManager $ \getManager -> testGroup "agda_solve_one"
   [ simpleTestCase "attempts to solve goal 0" $ do
       manager <- getManager
-      file <- exampleFile
-      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-solve-one", Types.format = Nothing })
+      withTempTestFile "Example.agda" $ \file -> do
+        _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-solve-one", Types.format = Nothing })
 
-      let tool = Types.AgdaSolveOne { Types.goalId = 0, Types.sessionId = Just "test-solve-one", Types.format = Nothing }
-      response <- runTool manager tool
+        let tool = Types.AgdaSolveOne { Types.goalId = 0, Types.sessionId = Just "test-solve-one", Types.format = Nothing }
+        response <- runTool manager tool
 
-      -- Should return SolveAll, GiveAction, or DisplayInfo
-      let kind = getField "kind" response
-      assertBool "Should be SolveAll, GiveAction, or DisplayInfo"
-        (kind == Just (JSON.String "SolveAll") ||
-         kind == Just (JSON.String "GiveAction") ||
-         kind == Just (JSON.String "DisplayInfo"))
+        -- Should return SolveAll, GiveAction, or DisplayInfo
+        let kind = getField "kind" response
+        assertBool "Should be SolveAll, GiveAction, or DisplayInfo"
+          (kind == Just (JSON.String "SolveAll") ||
+           kind == Just (JSON.String "GiveAction") ||
+           kind == Just (JSON.String "DisplayInfo"))
   ]
 
 helperFunctionTests :: TestTree
 helperFunctionTests = withSessionManager $ \getManager -> testGroup "agda_helper_function"
   [ simpleTestCase "generates helper function for goal 0" $ do
       manager <- getManager
-      file <- exampleFile
-      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-helper-function", Types.format = Nothing })
+      withTempTestFile "Example.agda" $ \file -> do
+        _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-helper-function", Types.format = Nothing })
 
-      let tool = Types.AgdaHelperFunction { Types.goalId = 0, Types.helperName = "helper", Types.sessionId = Just "test-helper-function", Types.format = Nothing }
-      response <- runTool manager tool
+        let tool = Types.AgdaHelperFunction { Types.goalId = 0, Types.helperName = "helper", Types.sessionId = Just "test-helper-function", Types.format = Nothing }
+        response <- runTool manager tool
 
-      -- Should return DisplayInfo with helper function suggestion
-      let kind = getField "kind" response
-      assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
+        -- Should return DisplayInfo with helper function suggestion
+        let kind = getField "kind" response
+        assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
   ]
 
 goalTypeContextTests :: TestTree

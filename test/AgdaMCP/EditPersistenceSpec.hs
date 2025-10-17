@@ -13,7 +13,6 @@ import qualified Data.Text.IO as TIO
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
-import Data.IORef
 import System.FilePath ((</>), takeDirectory, takeFileName)
 import System.Directory (getCurrentDirectory, copyFile, createDirectoryIfMissing, removeFile, removeDirectoryRecursive, getTemporaryDirectory)
 import System.Random (randomIO)
@@ -21,7 +20,9 @@ import Control.Exception (try, SomeException, bracket, catch)
 
 import AgdaMCP.Server
 import qualified AgdaMCP.Types as Types
+import qualified AgdaMCP.SessionManager as SessionManager
 import qualified MCP.Server as MCP
+import AgdaMCP.TestUtils (withTempTestFile)
 
 -- | Simple test case type
 data SimpleTest = SimpleTest String (IO ())
@@ -66,10 +67,9 @@ assertNotContains needle haystack =
 -- Test Utilities
 -- ============================================================================
 
--- | Copy test file from edit-persistence directory to a temporary location
--- Uses random temp directory to preserve module name and avoid conflicts
-copyTestFile :: FilePath -> IO FilePath
-copyTestFile filename = do
+-- | Custom version for edit-persistence subdirectory
+copyEditTestFile :: FilePath -> IO FilePath
+copyEditTestFile filename = do
   cwd <- getCurrentDirectory
   tmpDir <- getTemporaryDirectory
   randomHash <- randomIO :: IO Int
@@ -81,27 +81,27 @@ copyTestFile filename = do
   pure tempFile
 
 -- | Clean up temp directory
-cleanupTestFile :: FilePath -> IO ()
-cleanupTestFile filepath = do
+cleanupEditTestFile :: FilePath -> IO ()
+cleanupEditTestFile filepath = do
   let tempDir = takeDirectory filepath
   Control.Exception.catch (removeDirectoryRecursive tempDir) (\(_ :: SomeException) -> pure ())
 
--- | Bracket for temp file operations
-withTempTestFile :: FilePath -> (FilePath -> IO a) -> IO a
-withTempTestFile filename = bracket (copyTestFile filename) cleanupTestFile
+-- | Bracket for edit-persistence temp file operations
+withTempEditTestFile :: FilePath -> (FilePath -> IO a) -> IO a
+withTempEditTestFile filename = bracket (copyEditTestFile filename) cleanupEditTestFile
 
 -- | Load a file
-loadFile :: IORef ServerState -> FilePath -> IO ()
-loadFile stateRef filepath = do
-  let tool = Types.AgdaLoad { Types.file = T.pack filepath, Types.format = Just "Full" }
-  _ <- handleAgdaTool stateRef tool
+loadFile :: SessionManager.SessionManager ServerState -> Text -> FilePath -> IO ()
+loadFile manager sessionId filepath = do
+  let tool = Types.AgdaLoad { Types.file = T.pack filepath, Types.sessionId = Just sessionId, Types.format = Just "Full" }
+  _ <- handleAgdaToolWithSession manager tool
   pure ()
 
 -- | Get goal count from a load response
-getGoalCount :: IORef ServerState -> IO Int
-getGoalCount stateRef = do
-  let tool = Types.AgdaGetGoals { Types.format = Just "Full" }
-  result <- handleAgdaTool stateRef tool
+getGoalCount :: SessionManager.SessionManager ServerState -> Text -> IO Int
+getGoalCount manager sessionId = do
+  let tool = Types.AgdaGetGoals { Types.sessionId = Just sessionId, Types.format = Just "Full" }
+  result <- handleAgdaToolWithSession manager tool
   case result of
     MCP.ContentText txt -> do
       case JSON.decode (LBS.fromStrict $ TE.encodeUtf8 txt) of
@@ -116,29 +116,33 @@ getGoalCount stateRef = do
     _ -> pure 0
 
 -- | Execute give command
-executeGive :: IORef ServerState -> Int -> Text -> IO ()
-executeGive stateRef goalId expr = do
-  let tool = Types.AgdaGive { Types.goalId = goalId, Types.expression = expr, Types.format = Nothing }
-  _ <- handleAgdaTool stateRef tool
+executeGive :: SessionManager.SessionManager ServerState -> Text -> Int -> Text -> IO ()
+executeGive manager sessionId goalId expr = do
+  let tool = Types.AgdaGive { Types.goalId = goalId, Types.expression = expr, Types.sessionId = Just sessionId, Types.format = Nothing }
+  _ <- handleAgdaToolWithSession manager tool
   pure ()
 
 -- | Execute refine command
-executeRefine :: IORef ServerState -> Int -> Text -> IO ()
-executeRefine stateRef goalId expr = do
-  let tool = Types.AgdaRefine { Types.goalId = goalId, Types.expression = expr, Types.format = Nothing }
-  _ <- handleAgdaTool stateRef tool
+executeRefine :: SessionManager.SessionManager ServerState -> Text -> Int -> Text -> IO ()
+executeRefine manager sessionId goalId expr = do
+  let tool = Types.AgdaRefine { Types.goalId = goalId, Types.expression = expr, Types.sessionId = Just sessionId, Types.format = Nothing }
+  _ <- handleAgdaToolWithSession manager tool
   pure ()
 
 -- | Execute case split command
-executeCaseSplit :: IORef ServerState -> Int -> Text -> IO ()
-executeCaseSplit stateRef goalId var = do
-  let tool = Types.AgdaCaseSplit { Types.goalId = goalId, Types.variable = var, Types.format = Nothing }
-  _ <- handleAgdaTool stateRef tool
+executeCaseSplit :: SessionManager.SessionManager ServerState -> Text -> Int -> Text -> IO ()
+executeCaseSplit manager sessionId goalId var = do
+  let tool = Types.AgdaCaseSplit { Types.goalId = goalId, Types.variable = var, Types.sessionId = Just sessionId, Types.format = Nothing }
+  _ <- handleAgdaToolWithSession manager tool
   pure ()
 
 -- ============================================================================
 -- Test Suite
 -- ============================================================================
+
+-- | SessionManager fixture for tests
+withSessionManager :: (IO (SessionManager.SessionManager ServerState) -> TestTree) -> TestTree
+withSessionManager = withResource initSessionManager SessionManager.destroySessionManager
 
 tests :: TestTree
 tests = testGroup "Edit Persistence Tests"
@@ -153,68 +157,72 @@ tests = testGroup "Edit Persistence Tests"
 -- ============================================================================
 
 replaceHoleTests :: TestTree
-replaceHoleTests = testGroup "ReplaceHole Edit Tests"
+replaceHoleTests = withSessionManager $ \getManager -> testGroup "ReplaceHole Edit Tests"
   [ simpleTestCase "simple give fills hole and file reloads" $ do
-      withTempTestFile "EditPersistenceTest.agda" $ \testFile -> do
-        stateRef <- initServerState
+      manager <- getManager
+      withTempEditTestFile "EditPersistenceTest.agda" $ \testFile -> do
+        let sessionId = "test-edit-simple-give"
 
         -- Load file
-        loadFile stateRef testFile
-        goalsBefore <- getGoalCount stateRef
+        loadFile manager sessionId testFile
+        goalsBefore <- getGoalCount manager sessionId
         assertEqual "Should have 10 goals initially" 10 goalsBefore
 
         -- Give: Fill goal 0 (simpleGive) with "true"
-        executeGive stateRef 0 "true"
+        executeGive manager sessionId 0 "true"
 
         -- Verify file edit
         content <- TIO.readFile testFile
         assertContains "simpleGive = true" content
 
         -- Reload and verify
-        loadFile stateRef testFile
-        goalsAfter <- getGoalCount stateRef
+        loadFile manager sessionId testFile
+        goalsAfter <- getGoalCount manager sessionId
         assertEqual "Should have 9 goals after give" 9 goalsAfter
 
   , simpleTestCase "give with expression persists correctly" $ do
-      withTempTestFile "EditPersistenceTest.agda" $ \testFile -> do
-        stateRef <- initServerState
-        loadFile stateRef testFile
+      manager <- getManager
+      withTempEditTestFile "EditPersistenceTest.agda" $ \testFile -> do
+        let sessionId = "test-edit-give-expression"
+        loadFile manager sessionId testFile
 
         -- Give: Fill goal 1 (refineTest) with "suc zero"
-        executeGive stateRef 1 "suc zero"
+        executeGive manager sessionId 1 "suc zero"
 
         -- Verify file contains exact expression
         content <- TIO.readFile testFile
         assertContains "refineTest = suc zero" content
 
         -- Reload succeeds
-        loadFile stateRef testFile
+        loadFile manager sessionId testFile
 
   , simpleTestCase "refine persists and creates new holes" $ do
-      withTempTestFile "EditPersistenceTest.agda" $ \testFile -> do
-        stateRef <- initServerState
-        loadFile stateRef testFile
+      manager <- getManager
+      withTempEditTestFile "EditPersistenceTest.agda" $ \testFile -> do
+        let sessionId = "test-edit-refine"
+        loadFile manager sessionId testFile
 
         -- Refine: Apply "suc" to goal 1 (refineTest)
-        executeRefine stateRef 1 "suc"
+        executeRefine manager sessionId 1 "suc"
 
         -- Verify file edit: Should have "suc ?" (Agda uses ? not {! !})
         content <- TIO.readFile testFile
         assertContains "refineTest = suc ?" content
 
         -- Reload and verify goal structure
-        loadFile stateRef testFile
-        goals <- getGoalCount stateRef
+        loadFile manager sessionId testFile
+        goals <- getGoalCount manager sessionId
         -- Should still have same number (refined one, created new sub-goal)
         assertEqual "Goal count should be same (refined but added subgoal)" 10 goals
 
   , simpleTestCase "give with unicode persists correctly" $ do
-      withTempTestFile "EditPersistenceTest.agda" $ \testFile -> do
-        stateRef <- initServerState
-        loadFile stateRef testFile
+      manager <- getManager
+      withTempEditTestFile "EditPersistenceTest.agda" $ \testFile -> do
+        let sessionId = "test-edit-unicode"
+        loadFile manager sessionId testFile
 
         -- Give: Fill goal 7 (unicodeTest) with "tt"
-        executeGive stateRef 7 "tt"
+        executeGive manager sessionId 7 "tt"
 
         -- Verify UTF-8 encoding preserved
         content <- TIO.readFile testFile
@@ -222,23 +230,24 @@ replaceHoleTests = testGroup "ReplaceHole Edit Tests"
         assertContains "data ⊤" content  -- Original Unicode preserved
 
         -- Reload succeeds
-        loadFile stateRef testFile
+        loadFile manager sessionId testFile
 
   , simpleTestCase "give with complex expression" $ do
-      withTempTestFile "EditPersistenceTest.agda" $ \testFile -> do
-        stateRef <- initServerState
-        loadFile stateRef testFile
+      manager <- getManager
+      withTempEditTestFile "EditPersistenceTest.agda" $ \testFile -> do
+        let sessionId = "test-edit-complex-expression"
+        loadFile manager sessionId testFile
 
         -- Give: Fill expressionTest with nested suc
         let longExpr = "suc (suc (suc (suc zero)))"
-        executeGive stateRef 9 longExpr
+        executeGive manager sessionId 9 longExpr
 
         -- Verify persists correctly
         content <- TIO.readFile testFile
         assertContains longExpr content
 
         -- Reload succeeds
-        loadFile stateRef testFile
+        loadFile manager sessionId testFile
   ]
 
 -- ============================================================================
@@ -246,14 +255,15 @@ replaceHoleTests = testGroup "ReplaceHole Edit Tests"
 -- ============================================================================
 
 replaceLineTests :: TestTree
-replaceLineTests = testGroup "ReplaceLine Edit Tests"
+replaceLineTests = withSessionManager $ \getManager -> testGroup "ReplaceLine Edit Tests"
   [ simpleTestCase "case split on Nat creates two clauses" $ do
-      withTempTestFile "EditPersistenceTest.agda" $ \testFile -> do
-        stateRef <- initServerState
-        loadFile stateRef testFile
+      manager <- getManager
+      withTempEditTestFile "EditPersistenceTest.agda" $ \testFile -> do
+        let sessionId = "test-edit-case-split"
+        loadFile manager sessionId testFile
 
         -- Case split on "_+_" function, goal 2, variable "n"
-        executeCaseSplit stateRef 2 "n"
+        executeCaseSplit manager sessionId 2 "n"
 
         -- Verify file edit: Line replaced with 2 clauses
         -- Note: Agda generates ? instead of {! !} in case split
@@ -263,18 +273,19 @@ replaceLineTests = testGroup "ReplaceLine Edit Tests"
         assertNotContains "n + m = {! !}" content  -- Original line gone
 
         -- Reload and verify goal structure changed
-        loadFile stateRef testFile
-        goalsAfter <- getGoalCount stateRef
+        loadFile manager sessionId testFile
+        goalsAfter <- getGoalCount manager sessionId
         -- Should have 11 goals (was 10, removed 1, added 2)
         assertEqual "Should have 11 goals after split" 11 goalsAfter
 
   , simpleTestCase "case split preserves indentation" $ do
-      withTempTestFile "EditPersistenceTest.agda" $ \testFile -> do
-        stateRef <- initServerState
-        loadFile stateRef testFile
+      manager <- getManager
+      withTempEditTestFile "EditPersistenceTest.agda" $ \testFile -> do
+        let sessionId = "test-edit-case-split-indentation"
+        loadFile manager sessionId testFile
 
         -- Case split on multiply (goal 3)
-        executeCaseSplit stateRef 3 "n"
+        executeCaseSplit manager sessionId 3 "n"
 
         -- Verify indentation matches
         content <- TIO.readFile testFile
@@ -291,25 +302,26 @@ replaceLineTests = testGroup "ReplaceLine Edit Tests"
           _ -> False
 
         -- Reload succeeds
-        loadFile stateRef testFile
+        loadFile manager sessionId testFile
 
   , simpleTestCase "nested case split" $ do
-      withTempTestFile "EditPersistenceTest.agda" $ \testFile -> do
-        stateRef <- initServerState
-        loadFile stateRef testFile
+      manager <- getManager
+      withTempEditTestFile "EditPersistenceTest.agda" $ \testFile -> do
+        let sessionId = "test-edit-nested-case-split"
+        loadFile manager sessionId testFile
 
         -- First split on "n" in nestedSplit (goal 8)
-        executeCaseSplit stateRef 8 "n"
+        executeCaseSplit manager sessionId 8 "n"
 
         -- Reload to get new goal structure
-        loadFile stateRef testFile
-        goalsAfter1 <- getGoalCount stateRef
+        loadFile manager sessionId testFile
+        goalsAfter1 <- getGoalCount manager sessionId
         assertEqual "Should have 11 goals after first split" 11 goalsAfter1
 
         -- After split: nestedSplit n m removed, replaced by 2 clauses
         -- New structure: 0-7 unchanged, 8: nestedSplit zero m, 9: nestedSplit (suc n) m, 10: expressionTest
         -- Now split on "m" in the zero clause (goal 8)
-        executeCaseSplit stateRef 8 "m"
+        executeCaseSplit manager sessionId 8 "m"
 
         -- Verify file has 3 clauses total (2 from first, 1 from second split becomes 2)
         -- Note: Agda generates ? instead of {! !} in case split
@@ -319,7 +331,7 @@ replaceLineTests = testGroup "ReplaceLine Edit Tests"
         assertContains "nestedSplit (suc n) m = ?" content
 
         -- Reload succeeds
-        loadFile stateRef testFile
+        loadFile manager sessionId testFile
   ]
 
 -- ============================================================================
@@ -327,24 +339,25 @@ replaceLineTests = testGroup "ReplaceLine Edit Tests"
 -- ============================================================================
 
 reloadVerificationTests :: TestTree
-reloadVerificationTests = testGroup "Reload Verification Tests"
+reloadVerificationTests = withSessionManager $ \getManager -> testGroup "Reload Verification Tests"
   [ simpleTestCase "sequential gives with reloads between" $ do
-      withTempTestFile "EditPersistenceTest.agda" $ \testFile -> do
-        stateRef <- initServerState
+      manager <- getManager
+      withTempEditTestFile "EditPersistenceTest.agda" $ \testFile -> do
+        let sessionId = "test-edit-sequential-gives"
 
         -- Load -> Give -> Reload -> Give -> Reload
-        loadFile stateRef testFile
-        goals1 <- getGoalCount stateRef
+        loadFile manager sessionId testFile
+        goals1 <- getGoalCount manager sessionId
         assertEqual "Initial: 10 goals" 10 goals1
 
-        executeGive stateRef 0 "true"
-        loadFile stateRef testFile
-        goals2 <- getGoalCount stateRef
+        executeGive manager sessionId 0 "true"
+        loadFile manager sessionId testFile
+        goals2 <- getGoalCount manager sessionId
         assertEqual "After first give: 9 goals" 9 goals2
 
-        executeGive stateRef 0 "zero"  -- New goal 0 after first give removed goal 0
-        loadFile stateRef testFile
-        goals3 <- getGoalCount stateRef
+        executeGive manager sessionId 0 "zero"  -- New goal 0 after first give removed goal 0
+        loadFile manager sessionId testFile
+        goals3 <- getGoalCount manager sessionId
         assertEqual "After second give: 8 goals" 8 goals3
 
         -- Verify file has both edits
@@ -353,22 +366,23 @@ reloadVerificationTests = testGroup "Reload Verification Tests"
         assertContains "refineTest = zero" content
 
   , simpleTestCase "case split then reload then fill new goal" $ do
-      withTempTestFile "EditPersistenceTest.agda" $ \testFile -> do
-        stateRef <- initServerState
-        loadFile stateRef testFile
+      manager <- getManager
+      withTempEditTestFile "EditPersistenceTest.agda" $ \testFile -> do
+        let sessionId = "test-edit-split-reload-fill"
+        loadFile manager sessionId testFile
 
         -- Case split on addition (goal 2: n + m)
-        executeCaseSplit stateRef 2 "n"
+        executeCaseSplit manager sessionId 2 "n"
 
         -- MUST reload to see new goal structure
-        loadFile stateRef testFile
-        goalsAfter <- getGoalCount stateRef
+        loadFile manager sessionId testFile
+        goalsAfter <- getGoalCount manager sessionId
         assertEqual "After split: 11 goals" 11 goalsAfter
 
         -- After split: goal 2 removed, replaced by 2 new goals at positions 2 and 3
         -- New structure: 0:simpleGive, 1:refineTest, 2:zero+m, 3:suc n+m, 4:n*m, ...
         -- Now fill the zero clause (goal 2)
-        executeGive stateRef 2 "m"
+        executeGive manager sessionId 2 "m"
 
         -- Verify file has split + fill
         -- Note: After give, the filled clause has value; unfilled has ?
@@ -377,8 +391,8 @@ reloadVerificationTests = testGroup "Reload Verification Tests"
         assertContains "suc n + m = ?" content
 
         -- Final reload succeeds
-        loadFile stateRef testFile
-        goalsFinal <- getGoalCount stateRef
+        loadFile manager sessionId testFile
+        goalsFinal <- getGoalCount manager sessionId
         assertEqual "After filling one clause: 10 goals" 10 goalsFinal
   ]
 
@@ -387,17 +401,18 @@ reloadVerificationTests = testGroup "Reload Verification Tests"
 -- ============================================================================
 
 edgeCaseTests :: TestTree
-edgeCaseTests = testGroup "Edge Case Tests"
+edgeCaseTests = withSessionManager $ \getManager -> testGroup "Edge Case Tests"
   [ simpleTestCase "give then refine same definition" $ do
-      withTempTestFile "EditPersistenceTest.agda" $ \testFile -> do
-        stateRef <- initServerState
-        loadFile stateRef testFile
+      manager <- getManager
+      withTempEditTestFile "EditPersistenceTest.agda" $ \testFile -> do
+        let sessionId = "test-edit-give-then-refine"
+        loadFile manager sessionId testFile
 
         -- Give to refineTest
-        executeGive stateRef 1 "zero"
+        executeGive manager sessionId 1 "zero"
 
         -- Reload
-        loadFile stateRef testFile
+        loadFile manager sessionId testFile
         content1 <- TIO.readFile testFile
         assertContains "refineTest = zero" content1
 
@@ -405,19 +420,20 @@ edgeCaseTests = testGroup "Edge Case Tests"
         -- just verifies the give persisted correctly
 
   , simpleTestCase "case split with same variable name" $ do
-      withTempTestFile "EditPersistenceTest.agda" $ \testFile -> do
-        stateRef <- initServerState
-        loadFile stateRef testFile
+      manager <- getManager
+      withTempEditTestFile "EditPersistenceTest.agda" $ \testFile -> do
+        let sessionId = "test-edit-split-same-variable"
+        loadFile manager sessionId testFile
 
         -- Split both + and * on "n" with reload between
-        executeCaseSplit stateRef 2 "n"
-        loadFile stateRef testFile  -- Reload to update goal structure
+        executeCaseSplit manager sessionId 2 "n"
+        loadFile manager sessionId testFile  -- Reload to update goal structure
 
         -- After first split: goal 2 (n+m) removed, replaced by 2 new goals
         -- New structure: 0:simpleGive, 1:refineTest, 2:zero+m, 3:suc n+m, 4:n*m, ...
         -- So n*m is now goal 4
-        executeCaseSplit stateRef 4 "n"
-        loadFile stateRef testFile
+        executeCaseSplit manager sessionId 4 "n"
+        loadFile manager sessionId testFile
 
         -- Both splits should be in file
         -- Note: Agda generates ? instead of {! !} in case split
