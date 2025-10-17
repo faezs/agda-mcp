@@ -25,6 +25,7 @@ import System.IO.Unsafe (unsafePerformIO)
 
 import AgdaMCP.Server
 import qualified AgdaMCP.Types as Types
+import qualified AgdaMCP.SessionManager as SessionManager
 import qualified MCP.Server as MCP
 
 -- | Simple test case type
@@ -57,24 +58,12 @@ assertBool msg condition =
 assertFailure :: String -> IO ()
 assertFailure = fail
 
--- | Cleanup function to gracefully shut down REPL thread
-cleanupServerState :: IORef ServerState -> IO ()
-cleanupServerState stateRef = do
-  state <- readIORef stateRef
-  case replAsync state of
-    Just asyncHandle -> do
-      -- Signal shutdown via MVar (tryPutMVar won't block if already signaled)
-      void $ tryPutMVar (shutdownVar state) ()
-      -- Wait for thread to actually exit (max 2 seconds for tests)
-      void $ timeout 2000000 $ waitCatch asyncHandle
-    Nothing -> return ()
-
 -- | Helper to run a tool and get the response as JSON (forces Full format)
-runTool :: IORef ServerState -> Types.AgdaTool -> IO JSON.Value
-runTool stateRef tool = do
+runTool :: SessionManager.SessionManager ServerState -> Types.AgdaTool -> IO JSON.Value
+runTool manager tool = do
   -- Force Full format for JSON parsing
   let toolWithFullFormat = setFormat tool (Just "Full")
-  result <- handleAgdaTool stateRef toolWithFullFormat
+  result <- handleAgdaToolWithSession manager toolWithFullFormat
   case result of
     MCP.ContentText txt -> do
       case JSON.decode (LBS.fromStrict $ TE.encodeUtf8 txt) of
@@ -82,20 +71,43 @@ runTool stateRef tool = do
         Nothing -> fail $ "Failed to parse JSON response: " ++ T.unpack txt
     _ -> fail "Expected ContentText response"
 
--- | Set format on a tool (preserves sessionId) - simplified for GetGoals only
+-- | Helper to run a tool and get the response as Text (forces Concise format)
+runToolConcise :: SessionManager.SessionManager ServerState -> Types.AgdaTool -> IO Text
+runToolConcise manager tool = do
+  -- Force Concise format
+  let toolWithConciseFormat = setFormat tool (Just "Concise")
+  result <- handleAgdaToolWithSession manager toolWithConciseFormat
+  case result of
+    MCP.ContentText txt -> pure txt
+    _ -> fail "Expected ContentText response"
+
+-- | Set format on a tool (preserves sessionId) - simplified for GetGoals and other tools
 setFormat :: Types.AgdaTool -> Maybe Text -> Types.AgdaTool
 setFormat (Types.AgdaGetGoals{Types.sessionId=sid}) fmt =
   Types.AgdaGetGoals{Types.sessionId=sid, Types.format=fmt}
+setFormat (Types.AgdaLoad{Types.file=f, Types.sessionId=sid}) fmt =
+  Types.AgdaLoad{Types.file=f, Types.sessionId=sid, Types.format=fmt}
+setFormat (Types.AgdaGive{Types.goalId=gid, Types.expression=expr, Types.sessionId=sid}) fmt =
+  Types.AgdaGive{Types.goalId=gid, Types.expression=expr, Types.sessionId=sid, Types.format=fmt}
+setFormat (Types.AgdaListPostulates{Types.file=f, Types.sessionId=sid}) fmt =
+  Types.AgdaListPostulates{Types.file=f, Types.sessionId=sid, Types.format=fmt}
 setFormat tool _ = tool  -- For other tools, just return as-is
 
 -- ============================================================================
 -- Multi-Agent Session Isolation Tests
 -- ============================================================================
 
+-- | Test fixture that provides a SessionManager
+withSessionManager :: (IO (SessionManager.SessionManager ServerState) -> TestTree) -> TestTree
+withSessionManager = withResource initSessionManager SessionManager.destroySessionManager
+
 tests :: TestTree
-tests = testGroup "Multi-Agent Session Isolation"
+tests = withSessionManager $ \getManager -> testGroup "Multi-Agent Session Isolation"
   [ simpleTestCase "multiple independent states maintain isolation" $ do
       hPutStrLn stderr "\n=== Starting Multi-Agent Test ==="
+
+      -- Get the shared SessionManager
+      manager <- getManager
 
       -- Setup: Get file paths
       cwd <- getCurrentDirectory
@@ -105,128 +117,114 @@ tests = testGroup "Multi-Agent Session Isolation"
       hPutStrLn stderr $ "Example path: " ++ examplePath
       hPutStrLn stderr $ "Postulate path: " ++ postulateFile
 
-      -- Use bracket to ensure cleanup happens even if test fails
-      bracket
-        (do
-          hPutStrLn stderr "\n--- Agent 1: Creating state ---"
-          initServerState)
-        cleanupServerState
-        (\state1 -> bracket
-          (do
-            hPutStrLn stderr "\n--- Agent 2: Creating state ---"
-            initServerState)
-          cleanupServerState
-          (\state2 -> do
-            -- Agent 1: Load Example.agda and work with it
-            hPutStrLn stderr "\n--- Agent 1: Loading Example.agda ---"
-            _ <- handleAgdaTool state1 (Types.AgdaLoad
-              { Types.file = T.pack examplePath
-              , Types.sessionId = Nothing
-              , Types.format = Nothing
-              })
+      -- Both agents use the same SessionManager with different sessionIds
+      do
+        -- Agent 1: Load Example.agda with sessionId "agent-1"
+        hPutStrLn stderr "\n--- Agent 1: Loading Example.agda ---"
+        _ <- runTool manager (Types.AgdaLoad
+          { Types.file = T.pack examplePath
+          , Types.sessionId = Just "agent-1"
+          , Types.format = Nothing
+          })
 
-            -- Agent 2: Load PostulateTest.agda in separate state
-            hPutStrLn stderr "\n--- Agent 2: Loading PostulateTest.agda ---"
-            _ <- handleAgdaTool state2 (Types.AgdaLoad
-              { Types.file = T.pack postulateFile
-              , Types.sessionId = Nothing
-              , Types.format = Nothing
-              })
+        -- Agent 2: Load PostulateTest.agda with sessionId "agent-2"
+        hPutStrLn stderr "\n--- Agent 2: Loading PostulateTest.agda ---"
+        _ <- runTool manager (Types.AgdaLoad
+          { Types.file = T.pack postulateFile
+          , Types.sessionId = Just "agent-2"
+          , Types.format = Nothing
+          })
 
-            -- Agent 1: Get goals from Example.agda
-            hPutStrLn stderr "\n--- Agent 1: Getting goals (initial) ---"
-            goals1_before <- runTool state1 (Types.AgdaGetGoals
-              { Types.sessionId = Nothing
-              , Types.format = Nothing
-              })
+        -- Agent 1: Get goals from Example.agda
+        hPutStrLn stderr "\n--- Agent 1: Getting goals (initial) ---"
+        goals1_before <- runTool manager (Types.AgdaGetGoals
+          { Types.sessionId = Just "agent-1"
+          , Types.format = Nothing
+          })
 
-            hPutStrLn stderr $ "Agent 1 goals response: " ++ show goals1_before
+        hPutStrLn stderr $ "Agent 1 goals response: " ++ show goals1_before
 
-            let goalCount1_before = countGoals goals1_before
-            hPutStrLn stderr $ "Agent 1 goal count: " ++ show goalCount1_before
-            assertBool "Agent 1 should see 5 goals initially" (goalCount1_before == 5)
+        let goalCount1_before = countGoals goals1_before
+        hPutStrLn stderr $ "Agent 1 goal count: " ++ show goalCount1_before
+        assertBool "Agent 1 should see 5 goals initially" (goalCount1_before == 5)
 
-            -- Agent 1: Fill first goal with 'zero'
-            hPutStrLn stderr "\n--- Agent 1: Filling goal 0 with 'zero' ---"
-            _ <- handleAgdaTool state1 (Types.AgdaGive
-              { Types.goalId = 0
-              , Types.expression = "zero"
-              , Types.sessionId = Nothing
-              , Types.format = Nothing
-              })
+        -- Agent 1: Fill first goal with 'zero'
+        hPutStrLn stderr "\n--- Agent 1: Filling goal 0 with 'zero' ---"
+        _ <- runTool manager (Types.AgdaGive
+          { Types.goalId = 0
+          , Types.expression = "zero"
+          , Types.sessionId = Just "agent-1"
+          , Types.format = Nothing
+          })
 
-            -- Agent 2: Get goals from PostulateTest.agda (should be empty)
-            hPutStrLn stderr "\n--- Agent 2: Getting goals ---"
-            goals2 <- runTool state2 (Types.AgdaGetGoals
-              { Types.sessionId = Nothing
-              , Types.format = Nothing
-              })
+        -- Agent 2: Get goals from PostulateTest.agda (should be empty)
+        hPutStrLn stderr "\n--- Agent 2: Getting goals ---"
+        goals2 <- runTool manager (Types.AgdaGetGoals
+          { Types.sessionId = Just "agent-2"
+          , Types.format = Nothing
+          })
 
-            hPutStrLn stderr $ "Agent 2 goals response: " ++ show goals2
+        hPutStrLn stderr $ "Agent 2 goals response: " ++ show goals2
 
-            let goalCount2 = countGoals goals2
-            hPutStrLn stderr $ "Agent 2 goal count: " ++ show goalCount2
-            assertBool "Agent 2 should see 0 goals (all postulates)" (goalCount2 == 0)
+        let goalCount2 = countGoals goals2
+        hPutStrLn stderr $ "Agent 2 goal count: " ++ show goalCount2
+        assertBool "Agent 2 should see 0 goals (all postulates)" (goalCount2 == 0)
 
-            -- Agent 1: Get goals again - should see one less goal (no reload needed)
-            hPutStrLn stderr "\n--- Agent 1: Getting goals (after first fill) ---"
-            goals1_after <- runTool state1 (Types.AgdaGetGoals
-              { Types.sessionId = Nothing
-              , Types.format = Nothing
-              })
+        -- Agent 1: Get goals again - should see one less goal (no reload needed)
+        hPutStrLn stderr "\n--- Agent 1: Getting goals (after first fill) ---"
+        goals1_after <- runTool manager (Types.AgdaGetGoals
+          { Types.sessionId = Just "agent-1"
+          , Types.format = Nothing
+          })
 
-            hPutStrLn stderr $ "Agent 1 goals response (after fill): " ++ show goals1_after
+        hPutStrLn stderr $ "Agent 1 goals response (after fill): " ++ show goals1_after
 
-            let goalCount1_after = countGoals goals1_after
-            hPutStrLn stderr $ "Agent 1 goal count (after fill): " ++ show goalCount1_after
-            assertBool "Agent 1 should see 4 goals after filling one" (goalCount1_after == 4)
+        let goalCount1_after = countGoals goals1_after
+        hPutStrLn stderr $ "Agent 1 goal count (after fill): " ++ show goalCount1_after
+        assertBool "Agent 1 should see 4 goals after filling one" (goalCount1_after == 4)
 
-            -- Agent 2: List postulates (should work without interference from Agent 1)
-            hPutStrLn stderr "\n--- Agent 2: Listing postulates ---"
-            postulates <- handleAgdaTool state2 (Types.AgdaListPostulates
-              { Types.file = T.pack postulateFile
-              , Types.sessionId = Nothing
-              , Types.format = Nothing
-              })
-            case postulates of
-              MCP.ContentText txt -> do
-                hPutStrLn stderr $ "Agent 2 postulates: " ++ T.unpack (T.take 100 txt)
-                assertBool "Agent 2 should see postulates" (T.isInfixOf "postulate" txt || T.isInfixOf "double" txt)
-              _ -> assertFailure "Expected ContentText response from list postulates"
+        -- Agent 2: List postulates (should work without interference from Agent 1)
+        hPutStrLn stderr "\n--- Agent 2: Listing postulates ---"
+        postulatesText <- runToolConcise manager (Types.AgdaListPostulates
+          { Types.file = T.pack postulateFile
+          , Types.sessionId = Just "agent-2"
+          , Types.format = Nothing
+          })
+        hPutStrLn stderr $ "Agent 2 postulates: " ++ T.unpack (T.take 100 postulatesText)
+        assertBool "Agent 2 should see postulates" (T.isInfixOf "postulate" postulatesText || T.isInfixOf "double" postulatesText)
 
-            -- Agent 1: Fill another goal (goal 1) with 'suc zero'
-            hPutStrLn stderr "\n--- Agent 1: Filling goal 1 with 'suc zero' ---"
-            _ <- handleAgdaTool state1 (Types.AgdaGive
-              { Types.goalId = 1
-              , Types.expression = "suc zero"
-              , Types.sessionId = Nothing
-              , Types.format = Nothing
-              })
+        -- Agent 1: Fill another goal (goal 1) with 'suc zero'
+        hPutStrLn stderr "\n--- Agent 1: Filling goal 1 with 'suc zero' ---"
+        _ <- runTool manager (Types.AgdaGive
+          { Types.goalId = 1
+          , Types.expression = "suc zero"
+          , Types.sessionId = Just "agent-1"
+          , Types.format = Nothing
+          })
 
-            -- Agent 1: Verify state persists (should have 3 goals now)
-            hPutStrLn stderr "\n--- Agent 1: Getting goals (after second fill) ---"
-            goals1_final <- runTool state1 (Types.AgdaGetGoals
-              { Types.sessionId = Nothing
-              , Types.format = Nothing
-              })
+        -- Agent 1: Verify state persists (should have 3 goals now)
+        hPutStrLn stderr "\n--- Agent 1: Getting goals (after second fill) ---"
+        goals1_final <- runTool manager (Types.AgdaGetGoals
+          { Types.sessionId = Just "agent-1"
+          , Types.format = Nothing
+          })
 
-            let goalCount1_final = countGoals goals1_final
-            hPutStrLn stderr $ "Agent 1 goal count (final): " ++ show goalCount1_final
-            assertBool "Agent 1 should see 3 goals after filling two" (goalCount1_final == 3)
+        let goalCount1_final = countGoals goals1_final
+        hPutStrLn stderr $ "Agent 1 goal count (final): " ++ show goalCount1_final
+        assertBool "Agent 1 should see 3 goals after filling two" (goalCount1_final == 3)
 
-            -- Verify complete isolation: Agent 2 still sees 0 goals
-            hPutStrLn stderr "\n--- Agent 2: Getting goals (verification) ---"
-            goals2_verify <- runTool state2 (Types.AgdaGetGoals
-              { Types.sessionId = Nothing
-              , Types.format = Nothing
-              })
+        -- Verify complete isolation: Agent 2 still sees 0 goals
+        hPutStrLn stderr "\n--- Agent 2: Getting goals (verification) ---"
+        goals2_verify <- runTool manager (Types.AgdaGetGoals
+          { Types.sessionId = Just "agent-2"
+          , Types.format = Nothing
+          })
 
-            let goalCount2_verify = countGoals goals2_verify
-            hPutStrLn stderr $ "Agent 2 goal count (verification): " ++ show goalCount2_verify
-            assertBool "Agent 2 still has 0 goals (isolation verified)" (goalCount2_verify == 0)
+        let goalCount2_verify = countGoals goals2_verify
+        hPutStrLn stderr $ "Agent 2 goal count (verification): " ++ show goalCount2_verify
+        assertBool "Agent 2 still has 0 goals (isolation verified)" (goalCount2_verify == 0)
 
-            hPutStrLn stderr "\n=== Multi-Agent Test Completed Successfully ===")  -- Close state2 do block
-          )  -- Close state1 bracket
+        hPutStrLn stderr "\n=== Multi-Agent Test Completed Successfully ==="
   ]
   where
     countGoals :: JSON.Value -> Int

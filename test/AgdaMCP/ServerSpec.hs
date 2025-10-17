@@ -23,6 +23,7 @@ import System.Timeout (timeout)
 
 import AgdaMCP.Server
 import qualified AgdaMCP.Types as Types
+import qualified AgdaMCP.SessionManager as SessionManager
 import qualified MCP.Server as MCP
 import qualified AgdaMCP.MultiAgentSpec as MultiAgent
 
@@ -57,11 +58,11 @@ assertFailure :: String -> IO ()
 assertFailure = fail
 
 -- | Helper to run a tool and get the response as JSON (forces Full format)
-runTool :: IORef ServerState -> Types.AgdaTool -> IO JSON.Value
-runTool stateRef tool = do
+runTool :: SessionManager.SessionManager ServerState -> Types.AgdaTool -> IO JSON.Value
+runTool manager tool = do
   -- Force Full format for JSON parsing
   let toolWithFullFormat = setFormat tool (Just "Full")
-  result <- handleAgdaTool stateRef toolWithFullFormat
+  result <- handleAgdaToolWithSession manager toolWithFullFormat
   case result of
     MCP.ContentText txt -> do
       case JSON.decode (LBS.fromStrict $ TE.encodeUtf8 txt) of
@@ -70,11 +71,11 @@ runTool stateRef tool = do
     _ -> fail "Expected ContentText response"
 
 -- | Helper to run a tool and get concise text response
-runToolConcise :: IORef ServerState -> Types.AgdaTool -> IO Text
-runToolConcise stateRef tool = do
+runToolConcise :: SessionManager.SessionManager ServerState -> Types.AgdaTool -> IO Text
+runToolConcise manager tool = do
   -- Force Concise format
   let toolWithConciseFormat = setFormat tool (Just "Concise")
-  result <- handleAgdaTool stateRef toolWithConciseFormat
+  result <- handleAgdaToolWithSession manager toolWithConciseFormat
   case result of
     MCP.ContentText txt -> pure txt
     _ -> fail "Expected ContentText response"
@@ -116,51 +117,10 @@ getField _ _ = Nothing
 -- Resource Management
 -- ============================================================================
 
--- | Cleanup function to gracefully shut down REPL thread
-cleanupServerState :: IORef ServerState -> IO ()
-cleanupServerState stateRef = do
-  state <- readIORef stateRef
-  case replAsync state of
-    Just asyncHandle -> do
-      -- Signal shutdown via MVar (tryPutMVar won't block if already signaled)
-      void $ tryPutMVar (shutdownVar state) ()
-      -- Wait for thread to actually exit (max 2 seconds for tests)
-      void $ timeout 2000000 $ waitCatch asyncHandle
-    Nothing -> return ()
-
--- | Create a fresh server state resource with proper cleanup
-withFreshServer :: (IO (IORef ServerState) -> TestTree) -> TestTree
-withFreshServer = withResource initServerState cleanupServerState
-
--- | Create a server state with Example.agda already loaded
-withLoadedServer :: (IO (IORef ServerState) -> TestTree) -> TestTree
-withLoadedServer = withResource createLoadedState cleanupServerState
-  where
-    createLoadedState :: IO (IORef ServerState)
-    createLoadedState = do
-      stateRef <- initServerState
-      file <- exampleFile
-      _ <- handleAgdaTool stateRef (Types.AgdaLoad
-        { Types.file = T.pack file
-        , Types.sessionId = Nothing
-        , Types.format = Nothing
-        })
-      pure stateRef
-
--- | Create a server state with PostulateTest.agda already loaded
-withPostulateServer :: (IO (IORef ServerState) -> TestTree) -> TestTree
-withPostulateServer = withResource createPostulateState cleanupServerState
-  where
-    createPostulateState :: IO (IORef ServerState)
-    createPostulateState = do
-      stateRef <- initServerState
-      file <- postulateFile
-      _ <- handleAgdaTool stateRef (Types.AgdaLoad
-        { Types.file = T.pack file
-        , Types.sessionId = Nothing
-        , Types.format = Nothing
-        })
-      pure stateRef
+-- | Create a SessionManager resource with proper cleanup
+-- All tests will share this SessionManager, but each test gets its own isolated session via sessionId
+withSessionManager :: (IO (SessionManager.SessionManager ServerState) -> TestTree) -> TestTree
+withSessionManager = withResource initSessionManager SessionManager.destroySessionManager
 
 tests :: TestTree
 tests = testGroup "AgdaMCP.Server Tests"
@@ -208,12 +168,12 @@ searchTestFile = do
 
 -- | Tests for agda_load
 loadTests :: TestTree
-loadTests = testGroup "agda_load"
-  [ withFreshServer $ \getState -> simpleTestCase "loads file successfully and returns goals" $ do
-      stateRef <- getState
+loadTests = withSessionManager $ \getManager -> testGroup "agda_load"
+  [ simpleTestCase "loads file successfully and returns goals" $ do
+      manager <- getManager
       file <- exampleFile
-      let tool = Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+      let tool = Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-load-success", Types.format = Nothing }
+      response <- runTool manager tool
 
       -- Should return DisplayInfo with AllGoalsWarnings
       let kind = getField "kind" response
@@ -231,10 +191,10 @@ loadTests = testGroup "agda_load"
           assertEqual "Should have 5 goals" 5 (length goals)
         _ -> assertFailure "Should have visibleGoals array"
 
-  , withFreshServer $ \getState -> simpleTestCase "fails to load non-existent file" $ do
-      stateRef <- getState
-      let tool = Types.AgdaLoad { Types.file = "/non/existent/file.agda", Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+  , simpleTestCase "fails to load non-existent file" $ do
+      manager <- getManager
+      let tool = Types.AgdaLoad { Types.file = "/non/existent/file.agda", Types.sessionId = Just "test-load-error", Types.format = Nothing }
+      response <- runTool manager tool
 
       -- Should return an error response
       let kind = getField "kind" response
@@ -243,12 +203,16 @@ loadTests = testGroup "agda_load"
 
 -- | Tests for agda_get_goals
 getGoalsTests :: TestTree
-getGoalsTests = withLoadedServer $ \getState -> testGroup "agda_get_goals"
+getGoalsTests = withSessionManager $ \getManager -> testGroup "agda_get_goals"
   [ simpleTestCase "gets goals after successful load" $ do
-      stateRef <- getState
+      manager <- getManager
+      file <- exampleFile
 
-      -- Get goals from already loaded file
-      response <- runTool stateRef (Types.AgdaGetGoals { Types.sessionId = Nothing, Types.format = Nothing })
+      -- Load file first
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-get-goals", Types.format = Nothing })
+
+      -- Get goals from loaded file
+      response <- runTool manager (Types.AgdaGetGoals { Types.sessionId = Just "test-get-goals", Types.format = Nothing })
 
       let info = getField "info" response
       let visibleGoals = case info of
@@ -263,20 +227,28 @@ getGoalsTests = withLoadedServer $ \getState -> testGroup "agda_get_goals"
 
 -- | Tests for agda_get_goal_type
 getGoalTypeTests :: TestTree
-getGoalTypeTests = testGroup "agda_get_goal_type"
-  [ withLoadedServer $ \getState -> simpleTestCase "gets type of goal 0" $ do
-      stateRef <- getState
-      let tool = Types.AgdaGetGoalType { Types.goalId = 0, Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+getGoalTypeTests = withSessionManager $ \getManager -> testGroup "agda_get_goal_type"
+  [ simpleTestCase "gets type of goal 0" $ do
+      manager <- getManager
+      file <- exampleFile
+      -- Load file first
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-goal-type", Types.format = Nothing })
+
+      let tool = Types.AgdaGetGoalType { Types.goalId = 0, Types.sessionId = Just "test-goal-type", Types.format = Nothing }
+      response <- runTool manager tool
 
       -- Should return DisplayInfo with goal type
       let kind = getField "kind" response
       assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
 
-  , withLoadedServer $ \getState -> simpleTestCase "fails on invalid goal ID" $ do
-      stateRef <- getState
-      let tool = Types.AgdaGetGoalType { Types.goalId = 999, Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+  , simpleTestCase "fails on invalid goal ID" $ do
+      manager <- getManager
+      file <- exampleFile
+      -- Load file first
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-goal-type-invalid", Types.format = Nothing })
+
+      let tool = Types.AgdaGetGoalType { Types.goalId = 999, Types.sessionId = Just "test-goal-type-invalid", Types.format = Nothing }
+      response <- runTool manager tool
 
       -- Should return error
       let kind = getField "kind" response
@@ -284,20 +256,26 @@ getGoalTypeTests = testGroup "agda_get_goal_type"
   ]
 
 getGoalTypeImplicitsTests :: TestTree
-getGoalTypeImplicitsTests = testGroup "agda_get_goal_type_implicits"
-  [ withLoadedServer $ \getState -> simpleTestCase "gets type of goal 0 with implicits" $ do
-      stateRef <- getState
-      let tool = Types.AgdaGetGoalTypeImplicits { Types.goalId = 0, Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+getGoalTypeImplicitsTests = withSessionManager $ \getManager -> testGroup "agda_get_goal_type_implicits"
+  [ simpleTestCase "gets type of goal 0 with implicits" $ do
+      manager <- getManager
+      file <- exampleFile
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-goal-type-implicits", Types.format = Nothing })
+
+      let tool = Types.AgdaGetGoalTypeImplicits { Types.goalId = 0, Types.sessionId = Just "test-goal-type-implicits", Types.format = Nothing }
+      response <- runTool manager tool
 
       -- Should return DisplayInfo with goal type (showing implicit arguments)
       let kind = getField "kind" response
       assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
 
-  , withLoadedServer $ \getState -> simpleTestCase "fails on invalid goal ID" $ do
-      stateRef <- getState
-      let tool = Types.AgdaGetGoalTypeImplicits { Types.goalId = 999, Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+  , simpleTestCase "fails on invalid goal ID" $ do
+      manager <- getManager
+      file <- exampleFile
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-goal-type-implicits-invalid", Types.format = Nothing })
+
+      let tool = Types.AgdaGetGoalTypeImplicits { Types.goalId = 999, Types.sessionId = Just "test-goal-type-implicits-invalid", Types.format = Nothing }
+      response <- runTool manager tool
 
       -- Should return error
       let kind = getField "kind" response
@@ -306,11 +284,14 @@ getGoalTypeImplicitsTests = testGroup "agda_get_goal_type_implicits"
 
 -- | Tests for agda_get_context
 getContextTests :: TestTree
-getContextTests = withLoadedServer $ \getState -> testGroup "agda_get_context"
+getContextTests = withSessionManager $ \getManager -> testGroup "agda_get_context"
   [ simpleTestCase "gets context at goal 0" $ do
-      stateRef <- getState
-      let tool = Types.AgdaGetContext { Types.goalId = 0, Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+      manager <- getManager
+      file <- exampleFile
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-get-context", Types.format = Nothing })
+
+      let tool = Types.AgdaGetContext { Types.goalId = 0, Types.sessionId = Just "test-get-context", Types.format = Nothing }
+      response <- runTool manager tool
 
       let kind = getField "kind" response
       assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
@@ -320,11 +301,14 @@ getContextTests = withLoadedServer $ \getState -> testGroup "agda_get_context"
   ]
 
 getContextImplicitsTests :: TestTree
-getContextImplicitsTests = withLoadedServer $ \getState -> testGroup "agda_get_context_implicits"
+getContextImplicitsTests = withSessionManager $ \getManager -> testGroup "agda_get_context_implicits"
   [ simpleTestCase "gets context at goal 0 with implicits" $ do
-      stateRef <- getState
-      let tool = Types.AgdaGetContextImplicits { Types.goalId = 0, Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+      manager <- getManager
+      file <- exampleFile
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-get-context-implicits", Types.format = Nothing })
+
+      let tool = Types.AgdaGetContextImplicits { Types.goalId = 0, Types.sessionId = Just "test-get-context-implicits", Types.format = Nothing }
+      response <- runTool manager tool
 
       -- Should return DisplayInfo with context (showing implicit arguments in types)
       let kind = getField "kind" response
@@ -333,11 +317,14 @@ getContextImplicitsTests = withLoadedServer $ \getState -> testGroup "agda_get_c
 
 -- | Tests for agda_give
 giveTests :: TestTree
-giveTests = testGroup "agda_give"
-  [ withLoadedServer $ \getState -> simpleTestCase "successful give returns GiveAction" $ do
-      stateRef <- getState
-      let tool = Types.AgdaGive { Types.goalId = 0, Types.expression = "n", Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+giveTests = withSessionManager $ \getManager -> testGroup "agda_give"
+  [ simpleTestCase "successful give returns GiveAction" $ do
+      manager <- getManager
+      file <- exampleFile
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-give-success", Types.format = Nothing })
+
+      let tool = Types.AgdaGive { Types.goalId = 0, Types.expression = "n", Types.sessionId = Just "test-give-success", Types.format = Nothing }
+      response <- runTool manager tool
 
       let kind = getField "kind" response
       assertEqual "Should be GiveAction" (Just (JSON.String "GiveAction")) kind
@@ -345,11 +332,14 @@ giveTests = testGroup "agda_give"
       let giveResult = getField "giveResult" response
       assertBool "Should have giveResult" (giveResult /= Nothing)
 
-  , withLoadedServer $ \getState -> simpleTestCase "failed give returns error" $ do
-      stateRef <- getState
+  , simpleTestCase "failed give returns error" $ do
+      manager <- getManager
+      file <- exampleFile
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-give-error", Types.format = Nothing })
+
       -- Use a completely invalid expression to trigger a parse/scope error
-      let tool = Types.AgdaGive { Types.goalId = 0, Types.expression = "nonExistentName123", Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+      let tool = Types.AgdaGive { Types.goalId = 0, Types.expression = "nonExistentName123", Types.sessionId = Just "test-give-error", Types.format = Nothing }
+      response <- runTool manager tool
 
       let kind = getField "kind" response
       -- Should be DisplayInfo with error (scope error for undefined name)
@@ -366,11 +356,14 @@ giveTests = testGroup "agda_give"
 
 -- | Tests for agda_refine
 refineTests :: TestTree
-refineTests = withLoadedServer $ \getState -> testGroup "agda_refine"
+refineTests = withSessionManager $ \getManager -> testGroup "agda_refine"
   [ simpleTestCase "refines goal with constructor" $ do
-      stateRef <- getState
-      let tool = Types.AgdaRefine { Types.goalId = 1, Types.expression = "suc", Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+      manager <- getManager
+      file <- exampleFile
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-refine", Types.format = Nothing })
+
+      let tool = Types.AgdaRefine { Types.goalId = 1, Types.expression = "suc", Types.sessionId = Just "test-refine", Types.format = Nothing }
+      response <- runTool manager tool
 
       -- Refine should return GiveAction
       let kind = getField "kind" response
@@ -380,11 +373,14 @@ refineTests = withLoadedServer $ \getState -> testGroup "agda_refine"
 
 -- | Tests for agda_case_split
 caseSplitTests :: TestTree
-caseSplitTests = withLoadedServer $ \getState -> testGroup "agda_case_split"
+caseSplitTests = withSessionManager $ \getManager -> testGroup "agda_case_split"
   [ simpleTestCase "splits on variable n" $ do
-      stateRef <- getState
-      let tool = Types.AgdaCaseSplit { Types.goalId = 0, Types.variable = "n", Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+      manager <- getManager
+      file <- exampleFile
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-case-split", Types.format = Nothing })
+
+      let tool = Types.AgdaCaseSplit { Types.goalId = 0, Types.variable = "n", Types.sessionId = Just "test-case-split", Types.format = Nothing }
+      response <- runTool manager tool
 
       -- Case split returns MakeCase
       let kind = getField "kind" response
@@ -394,11 +390,14 @@ caseSplitTests = withLoadedServer $ \getState -> testGroup "agda_case_split"
 
 -- | Tests for agda_compute
 computeTests :: TestTree
-computeTests = withLoadedServer $ \getState -> testGroup "agda_compute"
+computeTests = withSessionManager $ \getManager -> testGroup "agda_compute"
   [ simpleTestCase "computes expression" $ do
-      stateRef <- getState
-      let tool = Types.AgdaCompute { Types.goalId = 0, Types.expression = "suc zero", Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+      manager <- getManager
+      file <- exampleFile
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-compute", Types.format = Nothing })
+
+      let tool = Types.AgdaCompute { Types.goalId = 0, Types.expression = "suc zero", Types.sessionId = Just "test-compute", Types.format = Nothing }
+      response <- runTool manager tool
 
       let kind = getField "kind" response
       assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
@@ -406,11 +405,14 @@ computeTests = withLoadedServer $ \getState -> testGroup "agda_compute"
 
 -- | Tests for agda_infer_type
 inferTypeTests :: TestTree
-inferTypeTests = withLoadedServer $ \getState -> testGroup "agda_infer_type"
+inferTypeTests = withSessionManager $ \getManager -> testGroup "agda_infer_type"
   [ simpleTestCase "infers type of valid expression" $ do
-      stateRef <- getState
-      let tool = Types.AgdaInferType { Types.goalId = 0, Types.expression = "suc zero", Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+      manager <- getManager
+      file <- exampleFile
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-infer-type", Types.format = Nothing })
+
+      let tool = Types.AgdaInferType { Types.goalId = 0, Types.expression = "suc zero", Types.sessionId = Just "test-infer-type", Types.format = Nothing }
+      response <- runTool manager tool
 
       let kind = getField "kind" response
       assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
@@ -418,11 +420,14 @@ inferTypeTests = withLoadedServer $ \getState -> testGroup "agda_infer_type"
 
 -- | Tests for agda_intro
 introTests :: TestTree
-introTests = withLoadedServer $ \getState -> testGroup "agda_intro"
+introTests = withSessionManager $ \getManager -> testGroup "agda_intro"
   [ simpleTestCase "introduces variables at identity goal" $ do
-      stateRef <- getState
-      let tool = Types.AgdaIntro { Types.goalId = 4, Types.sessionId = Nothing, Types.format = Nothing }  -- identity function goal
-      response <- runTool stateRef tool
+      manager <- getManager
+      file <- exampleFile
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-intro", Types.format = Nothing })
+
+      let tool = Types.AgdaIntro { Types.goalId = 4, Types.sessionId = Just "test-intro", Types.format = Nothing }  -- identity function goal
+      response <- runTool manager tool
 
       let kind = getField "kind" response
       assertBool "Should be GiveAction or DisplayInfo"
@@ -431,11 +436,14 @@ introTests = withLoadedServer $ \getState -> testGroup "agda_intro"
 
 -- | Tests for agda_auto
 autoTests :: TestTree
-autoTests = withLoadedServer $ \getState -> testGroup "agda_auto"
+autoTests = withSessionManager $ \getManager -> testGroup "agda_auto"
   [ simpleTestCase "attempts auto on simple goal" $ do
-      stateRef <- getState
-      let tool = Types.AgdaAuto { Types.goalId = 0, Types.timeout = Nothing, Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+      manager <- getManager
+      file <- exampleFile
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-auto-simple", Types.format = Nothing })
+
+      let tool = Types.AgdaAuto { Types.goalId = 0, Types.timeout = Nothing, Types.sessionId = Just "test-auto-simple", Types.format = Nothing }
+      response <- runTool manager tool
 
       -- Auto may succeed (GiveAction) or fail (DisplayInfo with error/auto result)
       let kind = getField "kind" response
@@ -443,9 +451,12 @@ autoTests = withLoadedServer $ \getState -> testGroup "agda_auto"
         (kind == Just (JSON.String "DisplayInfo") || kind == Just (JSON.String "GiveAction"))
 
   , simpleTestCase "respects timeout parameter" $ do
-      stateRef <- getState
-      let tool = Types.AgdaAuto { Types.goalId = 0, Types.timeout = Just 1000, Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+      manager <- getManager
+      file <- exampleFile
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-auto-timeout", Types.format = Nothing })
+
+      let tool = Types.AgdaAuto { Types.goalId = 0, Types.timeout = Just 1000, Types.sessionId = Just "test-auto-timeout", Types.format = Nothing }
+      response <- runTool manager tool
 
       -- Should complete within timeout
       let kind = getField "kind" response
@@ -454,11 +465,14 @@ autoTests = withLoadedServer $ \getState -> testGroup "agda_auto"
   ]
 
 autoAllTests :: TestTree
-autoAllTests = withLoadedServer $ \getState -> testGroup "agda_auto_all"
+autoAllTests = withSessionManager $ \getManager -> testGroup "agda_auto_all"
   [ simpleTestCase "attempts auto on all goals" $ do
-      stateRef <- getState
-      let tool = Types.AgdaAutoAll { Types.timeout = Nothing, Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+      manager <- getManager
+      file <- exampleFile
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-auto-all", Types.format = Nothing })
+
+      let tool = Types.AgdaAutoAll { Types.timeout = Nothing, Types.sessionId = Just "test-auto-all", Types.format = Nothing }
+      response <- runTool manager tool
 
       -- Should return SolveAll, GiveAction, or DisplayInfo
       let kind = getField "kind" response
@@ -468,9 +482,12 @@ autoAllTests = withLoadedServer $ \getState -> testGroup "agda_auto_all"
          kind == Just (JSON.String "DisplayInfo"))
 
   , simpleTestCase "respects timeout parameter" $ do
-      stateRef <- getState
-      let tool = Types.AgdaAutoAll { Types.timeout = Just 2000, Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+      manager <- getManager
+      file <- exampleFile
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-auto-all-timeout", Types.format = Nothing })
+
+      let tool = Types.AgdaAutoAll { Types.timeout = Just 2000, Types.sessionId = Just "test-auto-all-timeout", Types.format = Nothing }
+      response <- runTool manager tool
 
       -- Should complete within timeout
       let kind = getField "kind" response
@@ -481,11 +498,14 @@ autoAllTests = withLoadedServer $ \getState -> testGroup "agda_auto_all"
   ]
 
 solveOneTests :: TestTree
-solveOneTests = withLoadedServer $ \getState -> testGroup "agda_solve_one"
+solveOneTests = withSessionManager $ \getManager -> testGroup "agda_solve_one"
   [ simpleTestCase "attempts to solve goal 0" $ do
-      stateRef <- getState
-      let tool = Types.AgdaSolveOne { Types.goalId = 0, Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+      manager <- getManager
+      file <- exampleFile
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-solve-one", Types.format = Nothing })
+
+      let tool = Types.AgdaSolveOne { Types.goalId = 0, Types.sessionId = Just "test-solve-one", Types.format = Nothing }
+      response <- runTool manager tool
 
       -- Should return SolveAll, GiveAction, or DisplayInfo
       let kind = getField "kind" response
@@ -496,11 +516,14 @@ solveOneTests = withLoadedServer $ \getState -> testGroup "agda_solve_one"
   ]
 
 helperFunctionTests :: TestTree
-helperFunctionTests = withLoadedServer $ \getState -> testGroup "agda_helper_function"
+helperFunctionTests = withSessionManager $ \getManager -> testGroup "agda_helper_function"
   [ simpleTestCase "generates helper function for goal 0" $ do
-      stateRef <- getState
-      let tool = Types.AgdaHelperFunction { Types.goalId = 0, Types.helperName = "helper", Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+      manager <- getManager
+      file <- exampleFile
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-helper-function", Types.format = Nothing })
+
+      let tool = Types.AgdaHelperFunction { Types.goalId = 0, Types.helperName = "helper", Types.sessionId = Just "test-helper-function", Types.format = Nothing }
+      response <- runTool manager tool
 
       -- Should return DisplayInfo with helper function suggestion
       let kind = getField "kind" response
@@ -508,11 +531,14 @@ helperFunctionTests = withLoadedServer $ \getState -> testGroup "agda_helper_fun
   ]
 
 goalTypeContextTests :: TestTree
-goalTypeContextTests = withLoadedServer $ \getState -> testGroup "agda_goal_type_context"
+goalTypeContextTests = withSessionManager $ \getManager -> testGroup "agda_goal_type_context"
   [ simpleTestCase "gets type and context for goal 0" $ do
-      stateRef <- getState
-      let tool = Types.AgdaGoalTypeContext { Types.goalId = 0, Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+      manager <- getManager
+      file <- exampleFile
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-goal-type-context", Types.format = Nothing })
+
+      let tool = Types.AgdaGoalTypeContext { Types.goalId = 0, Types.sessionId = Just "test-goal-type-context", Types.format = Nothing }
+      response <- runTool manager tool
 
       -- Should return DisplayInfo with both goal type and context
       let kind = getField "kind" response
@@ -523,12 +549,12 @@ goalTypeContextTests = withLoadedServer $ \getState -> testGroup "agda_goal_type
 searchAboutTests :: TestTree
 searchAboutTests = testGroup "agda_search_about"
   [ testGroup "Basic functionality with Example.agda"
-      [ withFreshServer $ \getState -> simpleTestCase "finds Nat-related functions" $ do
-          stateRef <- getState
+      [ withSessionManager $ \getManager ->simpleTestCase "finds Nat-related functions" $ do
+          manager <- getManager
           file <- exampleFile
-          _ <- handleAgdaTool stateRef (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Nothing, Types.format = Nothing })
+          _ <- handleAgdaToolWithSession manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-search-nat-1", Types.format = Nothing })
 
-          response <- runTool stateRef (Types.AgdaSearchAbout { Types.query = "Nat", Types.sessionId = Nothing, Types.format = Just "Full" })
+          response <- runTool manager (Types.AgdaSearchAbout { Types.query = "Nat", Types.sessionId = Just "test-search-nat-1", Types.format = Just "Full" })
 
           let info = getField "info" response
           let results = case info of
@@ -552,12 +578,12 @@ searchAboutTests = testGroup "agda_search_about"
                 pure ()
             _ -> assertFailure "Expected results array"
 
-      , withFreshServer $ \getState -> simpleTestCase "finds multiple Nat operations" $ do
-          stateRef <- getState
+      , withSessionManager $ \getManager ->simpleTestCase "finds multiple Nat operations" $ do
+          manager <- getManager
           file <- exampleFile
-          _ <- handleAgdaTool stateRef (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Nothing, Types.format = Nothing })
+          _ <- handleAgdaToolWithSession manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-search-nat-2", Types.format = Nothing })
 
-          response <- runTool stateRef (Types.AgdaSearchAbout { Types.query = "Nat", Types.sessionId = Nothing, Types.format = Just "Full" })
+          response <- runTool manager (Types.AgdaSearchAbout { Types.query = "Nat", Types.sessionId = Just "test-search-nat-2", Types.format = Just "Full" })
 
           -- Should find at least 4 results: _*_, _+_, suc, zero
           let info = getField "info" response
@@ -570,12 +596,12 @@ searchAboutTests = testGroup "agda_search_about"
               assertBool "Should find multiple Nat operations" (V.length arr >= 3)
             _ -> assertFailure "Expected results array"
 
-      , withFreshServer $ \getState -> simpleTestCase "validates result structure" $ do
-          stateRef <- getState
+      , withSessionManager $ \getManager ->simpleTestCase "validates result structure" $ do
+          manager <- getManager
           file <- exampleFile
-          _ <- handleAgdaTool stateRef (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Nothing, Types.format = Nothing })
+          _ <- handleAgdaToolWithSession manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-search-validate", Types.format = Nothing })
 
-          response <- runTool stateRef (Types.AgdaSearchAbout { Types.query = "Nat", Types.sessionId = Nothing, Types.format = Just "Full" })
+          response <- runTool manager (Types.AgdaSearchAbout { Types.query = "Nat", Types.sessionId = Just "test-search-validate", Types.format = Just "Full" })
 
           -- Verify result structure has name and term fields
           let info = getField "info" response
@@ -590,35 +616,35 @@ searchAboutTests = testGroup "agda_search_about"
       ]
 
   , testGroup "Concise format"
-      [ withFreshServer $ \getState -> simpleTestCase "formats results concisely" $ do
-          stateRef <- getState
+      [ withSessionManager $ \getManager ->simpleTestCase "formats results concisely" $ do
+          manager <- getManager
           file <- exampleFile
-          _ <- handleAgdaTool stateRef (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Nothing, Types.format = Nothing })
+          _ <- handleAgdaToolWithSession manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-search-concise-1", Types.format = Nothing })
 
-          concise <- runToolConcise stateRef (Types.AgdaSearchAbout { Types.query = "Nat", Types.sessionId = Nothing, Types.format = Nothing })
+          concise <- runToolConcise manager (Types.AgdaSearchAbout { Types.query = "Nat", Types.sessionId = Just "test-search-concise-1", Types.format = Nothing })
 
           -- Should show "N results:\n  name : type\n  ..."
           assertBool "Should mention results" (T.isInfixOf "result" concise || T.isInfixOf "Result" concise)
 
-      , withFreshServer $ \getState -> simpleTestCase "shows 'No results found' for non-existent" $ do
-          stateRef <- getState
+      , withSessionManager $ \getManager ->simpleTestCase "shows 'No results found' for non-existent" $ do
+          manager <- getManager
           file <- searchTestFile
-          _ <- handleAgdaTool stateRef (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Nothing, Types.format = Nothing })
+          _ <- handleAgdaToolWithSession manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-search-not-found", Types.format = Nothing })
 
-          concise <- runToolConcise stateRef (Types.AgdaSearchAbout { Types.query = "NonExistent12345", Types.sessionId = Nothing, Types.format = Nothing })
+          concise <- runToolConcise manager (Types.AgdaSearchAbout { Types.query = "NonExistent12345", Types.sessionId = Just "test-search-not-found", Types.format = Nothing })
 
           assertEqual "Should say no results" "No results found" concise
       ]
 
   , testGroup "Edge cases"
-      [ withFreshServer $ \getState -> simpleTestCase "search returns valid response structure" $ do
-          stateRef <- getState
+      [ withSessionManager $ \getManager ->simpleTestCase "search returns valid response structure" $ do
+          manager <- getManager
           file <- exampleFile
-          _ <- handleAgdaTool stateRef (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Nothing, Types.format = Nothing })
+          _ <- handleAgdaToolWithSession manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-search-edge", Types.format = Nothing })
 
           -- Search for Nat-related terms
-          response1 <- runTool stateRef (Types.AgdaSearchAbout { Types.query = "Nat", Types.sessionId = Nothing, Types.format = Just "Full" })
-          response2 <- runTool stateRef (Types.AgdaSearchAbout { Types.query = "suc", Types.sessionId = Nothing, Types.format = Just "Full" })
+          response1 <- runTool manager (Types.AgdaSearchAbout { Types.query = "Nat", Types.sessionId = Just "test-search-edge", Types.format = Just "Full" })
+          response2 <- runTool manager (Types.AgdaSearchAbout { Types.query = "suc", Types.sessionId = Just "test-search-edge", Types.format = Just "Full" })
 
           -- Both should return valid responses with info field
           assertBool "Response1 should exist" (getField "info" response1 /= Nothing)
@@ -626,12 +652,12 @@ searchAboutTests = testGroup "agda_search_about"
       ]
 
   , testGroup "homotopy-nn integration"
-      [ withFreshServer $ \getState -> simpleTestCase "searches in Neural.Smooth.Calculus" $ do
-          stateRef <- getState
+      [ withSessionManager $ \getManager ->simpleTestCase "searches in Neural.Smooth.Calculus" $ do
+          manager <- getManager
           let calcFile = "/Users/faezs/homotopy-nn/src/Neural/Smooth/Calculus.agda"
 
-          _ <- handleAgdaTool stateRef (Types.AgdaLoad { Types.file = T.pack calcFile, Types.sessionId = Nothing, Types.format = Nothing })
-          response <- runTool stateRef (Types.AgdaSearchAbout { Types.query = "ℝ", Types.sessionId = Nothing, Types.format = Just "Full" })
+          _ <- handleAgdaToolWithSession manager (Types.AgdaLoad { Types.file = T.pack calcFile, Types.sessionId = Just "test-search-homotopy-1", Types.format = Nothing })
+          response <- runTool manager (Types.AgdaSearchAbout { Types.query = "ℝ", Types.sessionId = Just "test-search-homotopy-1", Types.format = Just "Full" })
 
           let info = getField "info" response
           let results = case info of
@@ -654,12 +680,12 @@ searchAboutTests = testGroup "agda_search_about"
                 pure ()
             _ -> assertFailure "Expected results array"
 
-      , withFreshServer $ \getState -> simpleTestCase "searches return consistent structure" $ do
-          stateRef <- getState
+      , withSessionManager $ \getManager ->simpleTestCase "searches return consistent structure" $ do
+          manager <- getManager
           let calcFile = "/Users/faezs/homotopy-nn/src/Neural/Smooth/Calculus.agda"
 
-          _ <- handleAgdaTool stateRef (Types.AgdaLoad { Types.file = T.pack calcFile, Types.sessionId = Nothing, Types.format = Nothing })
-          response <- runTool stateRef (Types.AgdaSearchAbout { Types.query = "ℝ", Types.sessionId = Nothing, Types.format = Just "Full" })
+          _ <- handleAgdaToolWithSession manager (Types.AgdaLoad { Types.file = T.pack calcFile, Types.sessionId = Just "test-search-homotopy-2", Types.format = Nothing })
+          response <- runTool manager (Types.AgdaSearchAbout { Types.query = "ℝ", Types.sessionId = Just "test-search-homotopy-2", Types.format = Just "Full" })
 
           -- Verify response has proper structure (already tested above, just checking consistency)
           let info = getField "info" response
@@ -674,29 +700,38 @@ searchAboutTests = testGroup "agda_search_about"
   ]
 
 showModuleTests :: TestTree
-showModuleTests = withLoadedServer $ \getState -> testGroup "agda_show_module"
+showModuleTests = withSessionManager $ \getManager -> testGroup "agda_show_module"
   [ simpleTestCase "shows builtin Nat module contents" $ do
-      stateRef <- getState
-      let tool = Types.AgdaShowModule { Types.moduleName = "Agda.Builtin.Nat", Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+      manager <- getManager
+      file <- exampleFile
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-show-module-builtin", Types.format = Nothing })
+
+      let tool = Types.AgdaShowModule { Types.moduleName = "Agda.Builtin.Nat", Types.sessionId = Just "test-show-module-builtin", Types.format = Nothing }
+      response <- runTool manager tool
 
       -- Should return DisplayInfo with module contents
       let kind = getField "kind" response
       assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
 
   , simpleTestCase "shows Data.Nat module contents" $ do
-      stateRef <- getState
-      let tool = Types.AgdaShowModule { Types.moduleName = "Data.Nat", Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+      manager <- getManager
+      file <- exampleFile
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-show-module-data", Types.format = Nothing })
+
+      let tool = Types.AgdaShowModule { Types.moduleName = "Data.Nat", Types.sessionId = Just "test-show-module-data", Types.format = Nothing }
+      response <- runTool manager tool
 
       -- Should return DisplayInfo with module contents
       let kind = getField "kind" response
       assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
 
   , simpleTestCase "handles non-existent module gracefully" $ do
-      stateRef <- getState
-      let tool = Types.AgdaShowModule { Types.moduleName = "NonExistent.Module", Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+      manager <- getManager
+      file <- exampleFile
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-show-module-nonexistent", Types.format = Nothing })
+
+      let tool = Types.AgdaShowModule { Types.moduleName = "NonExistent.Module", Types.sessionId = Just "test-show-module-nonexistent", Types.format = Nothing }
+      response <- runTool manager tool
 
       -- Should return an error or DisplayInfo response
       let kind = getField "kind" response
@@ -705,20 +740,26 @@ showModuleTests = withLoadedServer $ \getState -> testGroup "agda_show_module"
   ]
 
 showConstraintsTests :: TestTree
-showConstraintsTests = withLoadedServer $ \getState -> testGroup "agda_show_constraints"
+showConstraintsTests = withSessionManager $ \getManager -> testGroup "agda_show_constraints"
   [ simpleTestCase "shows constraints for loaded file" $ do
-      stateRef <- getState
-      let tool = Types.AgdaShowConstraints { Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+      manager <- getManager
+      file <- exampleFile
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-show-constraints-1", Types.format = Nothing })
+
+      let tool = Types.AgdaShowConstraints { Types.sessionId = Just "test-show-constraints-1", Types.format = Nothing }
+      response <- runTool manager tool
 
       -- Should return DisplayInfo with constraints (or no constraints)
       let kind = getField "kind" response
       assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
 
   , simpleTestCase "returns no constraints for complete file" $ do
-      stateRef <- getState
-      let tool = Types.AgdaShowConstraints { Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+      manager <- getManager
+      file <- exampleFile
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-show-constraints-2", Types.format = Nothing })
+
+      let tool = Types.AgdaShowConstraints { Types.sessionId = Just "test-show-constraints-2", Types.format = Nothing }
+      response <- runTool manager tool
 
       -- Example.agda should have no unsolved constraints
       let kind = getField "kind" response
@@ -727,19 +768,25 @@ showConstraintsTests = withLoadedServer $ \getState -> testGroup "agda_show_cons
 
 -- | Tests for agda_why_in_scope
 whyInScopeTests :: TestTree
-whyInScopeTests = testGroup "agda_why_in_scope"
-  [ withLoadedServer $ \getState -> simpleTestCase "looks up existing name" $ do
-      stateRef <- getState
-      let tool = Types.AgdaWhyInScope { Types.name = "suc", Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+whyInScopeTests = withSessionManager $ \getManager -> testGroup "agda_why_in_scope"
+  [ simpleTestCase "looks up existing name" $ do
+      manager <- getManager
+      file <- exampleFile
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-why-in-scope-exists", Types.format = Nothing })
+
+      let tool = Types.AgdaWhyInScope { Types.name = "suc", Types.sessionId = Just "test-why-in-scope-exists", Types.format = Nothing }
+      response <- runTool manager tool
 
       let kind = getField "kind" response
       assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
 
-  , withLoadedServer $ \getState -> simpleTestCase "looks up non-existent name" $ do
-      stateRef <- getState
-      let tool = Types.AgdaWhyInScope { Types.name = "nonExistentName123", Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+  , simpleTestCase "looks up non-existent name" $ do
+      manager <- getManager
+      file <- exampleFile
+      _ <- runTool manager (Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-why-in-scope-nonexistent", Types.format = Nothing })
+
+      let tool = Types.AgdaWhyInScope { Types.name = "nonExistentName123", Types.sessionId = Just "test-why-in-scope-nonexistent", Types.format = Nothing }
+      response <- runTool manager tool
 
       let kind = getField "kind" response
       assertEqual "Should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
@@ -748,11 +795,11 @@ whyInScopeTests = testGroup "agda_why_in_scope"
 -- | Tests for agda_list_postulates
 listPostulatesTests :: TestTree
 listPostulatesTests = testGroup "agda_list_postulates"
-  [ withFreshServer $ \getState -> simpleTestCase "lists postulates in Full format" $ do
-      stateRef <- getState
+  [ withSessionManager $ \getManager ->simpleTestCase "lists postulates in Full format" $ do
+      manager <- getManager
       file <- postulateFile
-      let tool = Types.AgdaListPostulates { Types.file = T.pack file, Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+      let tool = Types.AgdaListPostulates { Types.file = T.pack file, Types.sessionId = Just "test-postulates-full", Types.format = Nothing }
+      response <- runTool manager tool
 
       -- Should return a JSON array of postulates
       case response of
@@ -771,11 +818,11 @@ listPostulatesTests = testGroup "agda_list_postulates"
             _ -> assertFailure "Postulate should be a JSON object"
         _ -> assertFailure "Response should be a JSON array"
 
-  , withFreshServer $ \getState -> simpleTestCase "lists postulates in Concise format" $ do
-      stateRef <- getState
+  , withSessionManager $ \getManager ->simpleTestCase "lists postulates in Concise format" $ do
+      manager <- getManager
       file <- postulateFile
-      let tool = Types.AgdaListPostulates { Types.file = T.pack file, Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runToolConcise stateRef tool
+      let tool = Types.AgdaListPostulates { Types.file = T.pack file, Types.sessionId = Just "test-postulates-concise", Types.format = Nothing }
+      response <- runToolConcise manager tool
 
       -- Should return human-readable text like "5 postulates: ..."
       assertBool "Should mention '5 postulates'" (T.isInfixOf "5 postulates" response)
@@ -783,11 +830,11 @@ listPostulatesTests = testGroup "agda_list_postulates"
         (T.isInfixOf "foo" response && T.isInfixOf "bar" response && T.isInfixOf "baz" response)
       assertBool "Should mention line numbers" (T.isInfixOf "at lines" response)
 
-  , withFreshServer $ \getState -> simpleTestCase "returns empty for file with no postulates" $ do
-      stateRef <- getState
+  , withSessionManager $ \getManager ->simpleTestCase "returns empty for file with no postulates" $ do
+      manager <- getManager
       file <- exampleFile
-      let tool = Types.AgdaListPostulates { Types.file = T.pack file, Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+      let tool = Types.AgdaListPostulates { Types.file = T.pack file, Types.sessionId = Just "test-postulates-empty", Types.format = Nothing }
+      response <- runTool manager tool
 
       -- Should return empty array
       case response of
@@ -795,11 +842,11 @@ listPostulatesTests = testGroup "agda_list_postulates"
           assertEqual "Should have 0 postulates" 0 (V.length postulates)
         _ -> assertFailure "Response should be a JSON array"
 
-  , withFreshServer $ \getState -> simpleTestCase "extracts correct postulate names" $ do
-      stateRef <- getState
+  , withSessionManager $ \getManager ->simpleTestCase "extracts correct postulate names" $ do
+      manager <- getManager
       file <- postulateFile
-      let tool = Types.AgdaListPostulates { Types.file = T.pack file, Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+      let tool = Types.AgdaListPostulates { Types.file = T.pack file, Types.sessionId = Just "test-postulates-names", Types.format = Nothing }
+      response <- runTool manager tool
 
       -- Check postulate names
       case response of
@@ -812,11 +859,11 @@ listPostulatesTests = testGroup "agda_list_postulates"
           assertBool "Should contain 'composition'" ("PostulateTest.composition" `elem` names)
         _ -> assertFailure "Response should be a JSON array"
 
-  , withFreshServer $ \getState -> simpleTestCase "provides correct types for postulates" $ do
-      stateRef <- getState
+  , withSessionManager $ \getManager ->simpleTestCase "provides correct types for postulates" $ do
+      manager <- getManager
       file <- postulateFile
-      let tool = Types.AgdaListPostulates { Types.file = T.pack file, Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+      let tool = Types.AgdaListPostulates { Types.file = T.pack file, Types.sessionId = Just "test-postulates-types", Types.format = Nothing }
+      response <- runTool manager tool
 
       -- Check that at least one postulate has its expected type
       case response of
@@ -845,12 +892,12 @@ listPostulatesTests = testGroup "agda_list_postulates"
 -- | Tests for agda_goal_at_position
 goalAtPositionTests :: TestTree
 goalAtPositionTests = testGroup "agda_goal_at_position"
-  [ withFreshServer $ \getState -> simpleTestCase "finds goal at position" $ do
-      stateRef <- getState
+  [ withSessionManager $ \getManager ->simpleTestCase "finds goal at position" $ do
+      manager <- getManager
       file <- exampleFile
       -- Line 10, column 13 is inside the first goal {! !}
-      let tool = Types.AgdaGoalAtPosition { Types.file = T.pack file, Types.line = 10, Types.column = 13, Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runTool stateRef tool
+      let tool = Types.AgdaGoalAtPosition { Types.file = T.pack file, Types.line = 10, Types.column = 13, Types.sessionId = Just "test-goal-at-pos-found", Types.format = Nothing }
+      response <- runTool manager tool
 
       -- Check that we got a goal back with goalId field
       let goalId = getField "goalId" response
@@ -859,23 +906,23 @@ goalAtPositionTests = testGroup "agda_goal_at_position"
       let goalType = getField "goalType" response
       assertBool "Should have goalType field" (goalType /= Nothing)
 
-  , withFreshServer $ \getState -> simpleTestCase "returns error when no goal at position" $ do
-      stateRef <- getState
+  , withSessionManager $ \getManager ->simpleTestCase "returns error when no goal at position" $ do
+      manager <- getManager
       file <- exampleFile
       -- Line 1, column 1 is not inside any goal
-      let tool = Types.AgdaGoalAtPosition { Types.file = T.pack file, Types.line = 1, Types.column = 1, Types.sessionId = Nothing, Types.format = Nothing }
-      result <- handleAgdaTool stateRef tool
+      let tool = Types.AgdaGoalAtPosition { Types.file = T.pack file, Types.line = 1, Types.column = 1, Types.sessionId = Just "test-goal-at-pos-not-found", Types.format = Nothing }
+      result <- handleAgdaToolWithSession manager tool
 
       case result of
         MCP.ContentText txt -> assertBool "Should mention no goal found" (T.isInfixOf "No goal found" txt)
         _ -> assertFailure "Expected ContentText response"
 
-  , withFreshServer $ \getState -> simpleTestCase "formats concisely" $ do
-      stateRef <- getState
+  , withSessionManager $ \getManager ->simpleTestCase "formats concisely" $ do
+      manager <- getManager
       file <- exampleFile
       -- Line 10, column 13 is inside the first goal
-      let tool = Types.AgdaGoalAtPosition { Types.file = T.pack file, Types.line = 10, Types.column = 13, Types.sessionId = Nothing, Types.format = Nothing }
-      response <- runToolConcise stateRef tool
+      let tool = Types.AgdaGoalAtPosition { Types.file = T.pack file, Types.line = 10, Types.column = 13, Types.sessionId = Just "test-goal-at-pos-concise", Types.format = Nothing }
+      response <- runToolConcise manager tool
 
       -- Concise format should show goal like "?<0> : Nat (10:12)"
       assertBool "Should contain goal marker" (T.isInfixOf "?" response)
