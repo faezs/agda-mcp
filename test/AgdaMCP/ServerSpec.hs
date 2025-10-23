@@ -125,7 +125,9 @@ withSessionManager = withResource initSessionManager SessionManager.destroySessi
 
 tests :: TestTree
 tests = testGroup "AgdaMCP.Server Tests"
-  [ loadTests
+  [ findProjectRootTests
+  , libraryResolutionTests
+  , loadTests
   , getGoalsTests
   , getGoalTypeTests
   , getGoalTypeImplicitsTests
@@ -149,6 +151,59 @@ tests = testGroup "AgdaMCP.Server Tests"
   , whyInScopeTests
   , listPostulatesTests
   , MultiAgent.tests
+  ]
+
+-- ============================================================================
+-- Helper Function Tests
+-- ============================================================================
+
+-- | Tests for findProjectRoot helper function
+findProjectRootTests :: TestTree
+findProjectRootTests = testGroup "findProjectRoot"
+  [ simpleTestCase "finds project root from nested file" $ do
+      -- Test with Example.agda - should find the test directory with test.agda-lib
+      file <- exampleFile
+      maybeRoot <- findProjectRoot file
+      case maybeRoot of
+        Nothing -> assertFailure "Should find project root for test file"
+        Just root -> do
+          -- Should find agda-mcp.agda-lib in the root
+          cwd <- getCurrentDirectory
+          assertEqual "Should find project root" cwd root
+
+  , simpleTestCase "returns Nothing for file without project root" $ do
+      -- Test with a file at root level (no .agda-lib in parent directories)
+      let rootFile = "/tmp/standalone.agda"
+      maybeRoot <- findProjectRoot rootFile
+      assertEqual "Should return Nothing for file without .agda-lib" Nothing maybeRoot
+
+  , simpleTestCase "finds project root from deeply nested file" $ do
+      -- Test with a hypothetical deeply nested file
+      cwd <- getCurrentDirectory
+      let deepFile = cwd </> "test" </> "nested" </> "deep" </> "file.agda"
+      maybeRoot <- findProjectRoot deepFile
+      case maybeRoot of
+        Nothing -> assertFailure "Should find project root even from deeply nested path"
+        Just root -> assertEqual "Should find project root" cwd root
+  ]
+
+-- | Integration test for library resolution using project root
+libraryResolutionTests :: TestTree
+libraryResolutionTests = withSessionManager $ \getManager -> testGroup "library resolution"
+  [ simpleTestCase "loads file with project-local libraries" $ do
+      manager <- getManager
+      -- This should use the project's .agda-lib file and libraries file
+      file <- exampleFile
+      let tool = Types.AgdaLoad { Types.file = T.pack file, Types.sessionId = Just "test-lib-resolution", Types.format = Nothing }
+      response <- runTool manager tool
+
+      -- Should successfully load using project libraries
+      let kind = getField "kind" response
+      assertEqual "Response kind should be DisplayInfo" (Just (JSON.String "DisplayInfo")) kind
+
+      -- Verify it found goals (meaning file loaded successfully)
+      let info = getField "info" response
+      assertBool "Should have info field" (info /= Nothing)
   ]
 
 -- ============================================================================

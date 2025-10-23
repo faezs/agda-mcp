@@ -12,6 +12,7 @@ module AgdaMCP.Server
   , initSessionManager
   , handleAgdaToolWithSession
   , handleAgdaResourceWithSession
+  , findProjectRoot
   ) where
 
 import qualified Data.Aeson as JSON
@@ -31,12 +32,14 @@ import Control.Monad (forM, void, unless)
 import qualified Data.List
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Except (catchError)
+import qualified Control.Exception
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, takeMVar, tryPutMVar)
 import Control.Concurrent.Async (race, async, waitCatch, Async)
 import System.Timeout (timeout)
 import System.FilePath (takeDirectory)
+import System.Directory (listDirectory)
 
 -- MCP Server library
 import qualified MCP.Server
@@ -482,14 +485,23 @@ loadFileWithCache stateRef filepath = do
     _ -> do
       -- Not cached or different file - load it fresh
       liftIO $ putStrLn $ "Loading file fresh: " ++ filepath
-      fileDir <- liftIO $ absolute $ takeDirectory filepath
+
+      -- Find project root (directory containing .agda-lib file)
+      maybeProjectRoot <- liftIO $ findProjectRoot filepath
+      workDir <- case maybeProjectRoot of
+        Just root -> do
+          liftIO $ putStrLn $ "Found project root: " ++ root
+          liftIO $ absolute root
+        Nothing -> do
+          liftIO $ putStrLn $ "No project root found, using file directory"
+          liftIO $ absolute $ takeDirectory filepath
 
       -- Discover and load .agda-lib files for this file's project
       _ <- getAgdaLibFilesWithoutTopLevelModuleName absPath
 
       -- Set up library includes (adds library paths to options)
       optsWithLibs <- setLibraryIncludes defaultOptions
-      setCommandLineOptions' fileDir optsWithLibs
+      setCommandLineOptions' workDir optsWithLibs
 
       fileId <- idFromFile absPath
       let sourceFile = SourceFile fileId
@@ -504,15 +516,23 @@ loadFileWithCache stateRef filepath = do
 mcpLoadFile :: IORef ServerState -> FilePath -> TCM AgdaResult
 mcpLoadFile stateRef file = do
   absPath <- liftIO $ absolute file
-  -- Get the directory containing the file for options initialization
-  fileDir <- liftIO $ absolute $ takeDirectory file
+
+  -- Find project root (directory containing .agda-lib file)
+  maybeProjectRoot <- liftIO $ findProjectRoot file
+  workDir <- case maybeProjectRoot of
+    Just root -> do
+      liftIO $ putStrLn $ "Found project root: " ++ root
+      liftIO $ absolute root
+    Nothing -> do
+      liftIO $ putStrLn $ "No project root found, using file directory"
+      liftIO $ absolute $ takeDirectory file
 
   -- Discover and load .agda-lib files for this file's project
   _ <- getAgdaLibFilesWithoutTopLevelModuleName absPath
 
   -- Set up library includes (adds library paths to options)
   optsWithLibs <- setLibraryIncludes defaultOptions
-  setCommandLineOptions' fileDir optsWithLibs
+  setCommandLineOptions' workDir optsWithLibs
 
   -- Properly register the file and get its FileId
   fileId <- idFromFile absPath
@@ -795,6 +815,25 @@ mcpWhyInScope stateRef name = do
   pure $ AgdaResult True "Scope information" (Just result)
 
 -- Helper functions
+
+-- | Find the project root by walking up directories looking for .agda-lib files
+-- Returns the directory containing an .agda-lib file, or Nothing if not found
+findProjectRoot :: FilePath -> IO (Maybe FilePath)
+findProjectRoot startPath = do
+  let dir = takeDirectory startPath
+  if dir == startPath  -- Reached filesystem root
+    then return Nothing
+    else do
+      -- List all files in directory (return empty list on error)
+      filesResult <- Control.Exception.try (listDirectory dir) :: IO (Either Control.Exception.SomeException [FilePath])
+      let files = case filesResult of
+            Left _ -> []
+            Right fs -> fs
+      -- Check if any file ends with .agda-lib
+      let hasAgdaLib = any (\f -> ".agda-lib" `Data.List.isSuffixOf` f) files
+      if hasAgdaLib
+        then return (Just dir)
+        else findProjectRoot dir
 
 rangeToTuple :: Range -> (Int, Int, Int, Int)
 rangeToTuple range =
