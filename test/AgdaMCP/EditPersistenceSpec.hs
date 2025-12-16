@@ -21,7 +21,7 @@ import Control.Exception (try, SomeException, bracket, catch)
 import AgdaMCP.Server
 import qualified AgdaMCP.Types as Types
 import qualified AgdaMCP.SessionManager as SessionManager
-import qualified MCP.Server as MCP
+import MCP.Types (Content(..), TextContent(..))
 import AgdaMCP.TestUtils (withTempTestFile)
 
 -- | Simple test case type
@@ -103,7 +103,7 @@ getGoalCount manager sessionId = do
   let tool = Types.AgdaGetGoals { Types.sessionId = Just sessionId, Types.format = Just "Full" }
   result <- handleAgdaToolWithSession manager tool
   case result of
-    MCP.ContentText txt -> do
+    TextContentType (TextContent _ txt _ _) -> do
       case JSON.decode (LBS.fromStrict $ TE.encodeUtf8 txt) of
         Just (JSON.Object obj) -> do
           case JSON.KeyMap.lookup (JSON.Key.fromText "info") obj of

@@ -42,7 +42,7 @@ import System.FilePath (takeDirectory)
 import System.Directory (listDirectory)
 
 -- MCP Server library
-import qualified MCP.Server
+import MCP.Types (Content, TextContent(..), TextContentType(..), TextResourceContents(..), ResourceContents(..))
 import qualified AgdaMCP.Types
 import qualified AgdaMCP.Repl as Repl
 import qualified AgdaMCP.SessionManager as SessionManager
@@ -884,9 +884,13 @@ initServerState = do
   putStrLn "Persistent REPL started"
   pure stateRef
 
+-- | Helper to create a text content response
+mkTextContent :: Text -> Content
+mkTextContent txt = TextContentType $ TextContent "text" txt Nothing Nothing
+
 -- MCP Tool Handler - routes commands through persistent REPL
 -- This will be called by the mcp-server library when a tool is invoked
-handleAgdaTool :: IORef ServerState -> AgdaMCP.Types.AgdaTool -> IO MCP.Server.Content
+handleAgdaTool :: IORef ServerState -> AgdaMCP.Types.AgdaTool -> IO Content
 handleAgdaTool stateRef tool = do
   -- Special handling for tools that need custom logic (don't use REPL)
   case tool of
@@ -894,34 +898,34 @@ handleAgdaTool stateRef tool = do
       -- Run directly in TCM (not through REPL)
       result <- runTCMTop $ mcpListPostulates stateRef (T.unpack file)
       case result of
-        Left err -> pure $ MCP.Server.ContentText $ "Error: " <> T.pack (show err)
+        Left err -> pure $ mkTextContent $ "Error: " <> T.pack (show err)
         Right (AgdaResult _ _ (Just val)) -> do
           let responseFormat = Format.getFormat tool
           let responseText = Format.formatResponse responseFormat val
-          pure $ MCP.Server.ContentText responseText
-        Right _ -> pure $ MCP.Server.ContentText "No postulates found"
+          pure $ mkTextContent responseText
+        Right _ -> pure $ mkTextContent "No postulates found"
 
     AgdaMCP.Types.AgdaGoalAtPosition{file, line, column} -> do
       -- Run directly in TCM to find goal at position
       result <- runTCMTop $ mcpGoalAtPosition stateRef (T.unpack file) line column
       case result of
-        Left err -> pure $ MCP.Server.ContentText $ "Error: " <> T.pack (show err)
+        Left err -> pure $ mkTextContent $ "Error: " <> T.pack (show err)
         Right (AgdaResult _ _ (Just val)) -> do
           let responseFormat = Format.getFormat tool
           let responseText = Format.formatResponse responseFormat val
-          pure $ MCP.Server.ContentText responseText
-        Right (AgdaResult _ msg Nothing) -> pure $ MCP.Server.ContentText msg
+          pure $ mkTextContent responseText
+        Right (AgdaResult _ msg Nothing) -> pure $ mkTextContent msg
 
     AgdaMCP.Types.AgdaGotoDefinition{file, line, column} -> do
       -- Run directly in TCM to find definition at position
       result <- runTCMTop $ mcpGotoDefinition stateRef (T.unpack file) line column
       case result of
-        Left err -> pure $ MCP.Server.ContentText $ "Error: " <> T.pack (show err)
+        Left err -> pure $ mkTextContent $ "Error: " <> T.pack (show err)
         Right (AgdaResult _ _ (Just val)) -> do
           let responseFormat = Format.getFormat tool
           let responseText = Format.formatResponse responseFormat val
-          pure $ MCP.Server.ContentText responseText
-        Right (AgdaResult _ msg Nothing) -> pure $ MCP.Server.ContentText msg
+          pure $ mkTextContent responseText
+        Right (AgdaResult _ msg Nothing) -> pure $ mkTextContent msg
 
     -- All other tools go through REPL
     _ -> do
@@ -958,11 +962,15 @@ handleAgdaTool stateRef tool = do
       -- Format response based on requested format (default: Concise)
       let responseFormat = Format.getFormat tool
       let responseText = Format.formatResponse responseFormat jsonValue
-      pure $ MCP.Server.ContentText responseText
+      pure $ mkTextContent responseText
+
+-- | Helper to create text resource contents
+mkTextResource :: Text -> Text -> Maybe Text -> ResourceContents
+mkTextResource resourceUri txt mimeType = TextResource $ TextResourceContents resourceUri txt mimeType Nothing
 
 -- MCP Resource Handler - exposes Agda file information as resources
 -- Resources extract parameters from the URI path
-handleAgdaResource :: IORef ServerState -> MCP.Server.URI -> AgdaMCP.Types.AgdaResource -> IO MCP.Server.ResourceContent
+handleAgdaResource :: IORef ServerState -> Text -> AgdaMCP.Types.AgdaResource -> IO ResourceContents
 handleAgdaResource stateRef uri resource = do
   result <- runTCMTop $ case resource of
     AgdaMCP.Types.Goals -> do
@@ -983,13 +991,13 @@ handleAgdaResource stateRef uri resource = do
 
   case result of
     Left err ->
-      pure $ MCP.Server.ResourceText uri "text/plain" $ "Error: " <> T.pack (show err)
+      pure $ mkTextResource uri ("Error: " <> T.pack (show err)) (Just "text/plain")
     Right agdaRes ->
       case agdaResult agdaRes of
         Nothing ->
-          pure $ MCP.Server.ResourceText uri "text/plain" $ message agdaRes
+          pure $ mkTextResource uri (message agdaRes) (Just "text/plain")
         Just val ->
-          pure $ MCP.Server.ResourceText uri "application/json" $ TE.decodeUtf8 $ LBS.toStrict $ JSON.encode val
+          pure $ mkTextResource uri (TE.decodeUtf8 $ LBS.toStrict $ JSON.encode val) (Just "application/json")
 
 -- ============================================================================
 -- Session-based Handlers (Multi-agent Support)
@@ -1020,22 +1028,22 @@ initSessionManager = do
 
 -- | Session-aware tool handler
 -- Extracts sessionId from tool, gets or creates session, routes to appropriate ServerState
-handleAgdaToolWithSession :: SessionManager.SessionManager ServerState -> AgdaMCP.Types.AgdaTool -> IO MCP.Server.Content
+handleAgdaToolWithSession :: SessionManager.SessionManager ServerState -> AgdaMCP.Types.AgdaTool -> IO Content
 handleAgdaToolWithSession manager tool = do
   -- Extract session ID from tool (all tools now have this field)
-  let sessionId = AgdaMCP.Types.sessionId tool
+  let sessionIdVal = AgdaMCP.Types.sessionId tool
 
   -- Get or create session
-  stateRef <- SessionManager.getOrCreateSession manager sessionId
+  stateRef <- SessionManager.getOrCreateSession manager sessionIdVal
 
   -- Update last used timestamp
-  SessionManager.updateLastUsed manager sessionId
+  SessionManager.updateLastUsed manager sessionIdVal
 
   -- Route to existing handler
   handleAgdaTool stateRef tool
 
 -- | Session-aware resource handler
-handleAgdaResourceWithSession :: SessionManager.SessionManager ServerState -> MCP.Server.URI -> AgdaMCP.Types.AgdaResource -> IO MCP.Server.ResourceContent
+handleAgdaResourceWithSession :: SessionManager.SessionManager ServerState -> Text -> AgdaMCP.Types.AgdaResource -> IO ResourceContents
 handleAgdaResourceWithSession manager uri resource = do
   -- Resources don't have sessionId parameter, so use default session
   -- In the future, we could extract session from URI query parameters
