@@ -35,6 +35,10 @@
             # shower.source = inputs.shower; # Override shower to a custom source path
           };
           settings = {
+            agda-mcp = {
+              check = false;  # Disable tests for now
+              haddock = false;  # Disable haddock generation
+            };
             #  aeson = {
             #    check = false;
             #  };

@@ -74,6 +74,7 @@ module AgdaMCP.Autoformalizer.Types
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Aeson (ToJSON(..), FromJSON(..), (.=), (.:), (.:?))
+import Data.Aeson.Types (Parser)
 import qualified Data.Aeson as JSON
 import GHC.Generics (Generic)
 
@@ -217,7 +218,7 @@ instance ToJSON LoadResult where
 
 instance FromJSON LoadResult where
     parseJSON = JSON.withObject "LoadResult" $ \v -> do
-        tag <- v .: "tag" :: JSON.Parser Text
+        tag <- v .: "tag" :: Parser Text
         case tag of
             "LoadSuccess" -> LoadSuccess <$> v .: "goals"
             "LoadError" -> LoadError <$> v .: "message"
@@ -287,7 +288,7 @@ instance ToJSON GiveResult where
 
 instance FromJSON GiveResult where
     parseJSON = JSON.withObject "GiveResult" $ \v -> do
-        tag <- v .: "tag" :: JSON.Parser Text
+        tag <- v .: "tag" :: Parser Text
         case tag of
             "GiveSuccess" -> pure GiveSuccess
             "GiveRefined" -> GiveRefined <$> v .: "newHoles"
@@ -308,7 +309,7 @@ instance ToJSON RefineResult where
 
 instance FromJSON RefineResult where
     parseJSON = JSON.withObject "RefineResult" $ \v -> do
-        tag <- v .: "tag" :: JSON.Parser Text
+        tag <- v .: "tag" :: Parser Text
         case tag of
             "RefineSuccess" -> RefineSuccess <$> v .: "newHoles"
             "RefineError" -> RefineError <$> v .: "message"
@@ -328,7 +329,7 @@ instance ToJSON CaseSplitResult where
 
 instance FromJSON CaseSplitResult where
     parseJSON = JSON.withObject "CaseSplitResult" $ \v -> do
-        tag <- v .: "tag" :: JSON.Parser Text
+        tag <- v .: "tag" :: Parser Text
         case tag of
             "SplitSuccess" -> SplitSuccess <$> v .: "newHoles"
             "SplitError" -> SplitError <$> v .: "message"
@@ -348,7 +349,7 @@ instance ToJSON AutoResult where
 
 instance FromJSON AutoResult where
     parseJSON = JSON.withObject "AutoResult" $ \v -> do
-        tag <- v .: "tag" :: JSON.Parser Text
+        tag <- v .: "tag" :: Parser Text
         case tag of
             "AutoSuccess" -> AutoSuccess <$> v .: "term"
             "AutoFailed" -> pure AutoFailed
@@ -439,7 +440,7 @@ instance ToJSON Focus where
 
 instance FromJSON Focus where
     parseJSON = JSON.withObject "Focus" $ \v -> do
-        tag <- v .: "tag" :: JSON.Parser Text
+        tag <- v .: "tag" :: Parser Text
         case tag of
             "FillHole" -> FillHole <$> v .: "holeId"
             "FormalizeSection" -> FormalizeSection <$> v .: "sectionId"
@@ -495,7 +496,7 @@ instance ToJSON Status where
 
 instance FromJSON Status where
     parseJSON = JSON.withObject "Status" $ \v -> do
-        tag <- v .: "tag" :: JSON.Parser Text
+        tag <- v .: "tag" :: Parser Text
         case tag of
             "Success" -> pure Success
             "Partial" -> Partial <$> v .: "reason"
@@ -519,7 +520,7 @@ instance ToJSON Effect where
 
 instance FromJSON Effect where
     parseJSON = JSON.withObject "Effect" $ \v -> do
-        tag <- v .: "tag" :: JSON.Parser Text
+        tag <- v .: "tag" :: Parser Text
         case tag of
             "HoleFilled" -> HoleFilled <$> v .: "holeId" <*> v .: "term"
             "BijectionUpdated" -> BijectionUpdated <$> v .: "source" <*> v .: "formal"
@@ -622,7 +623,7 @@ instance ToJSON SourceOp where
 
 instance FromJSON SourceOp where
     parseJSON = JSON.withObject "SourceOp" $ \v -> do
-        op <- v .: "op" :: JSON.Parser Text
+        op <- v .: "op" :: Parser Text
         case op of
             "peek_section" -> PeekSection <$> v .: "sectionId"
             "grep_source" -> GrepSource <$> v .: "pattern"
@@ -662,7 +663,7 @@ instance ToJSON TargetOp where
 
 instance FromJSON TargetOp where
     parseJSON = JSON.withObject "TargetOp" $ \v -> do
-        op <- v .: "op" :: JSON.Parser Text
+        op <- v .: "op" :: Parser Text
         case op of
             "agda_load" -> AgdaLoadOp <$> v .: "module"
             "agda_get_goals" -> pure AgdaGetGoalsOp
@@ -694,7 +695,7 @@ instance ToJSON BijectionOp where
 
 instance FromJSON BijectionOp where
     parseJSON = JSON.withObject "BijectionOp" $ \v -> do
-        op <- v .: "op" :: JSON.Parser Text
+        op <- v .: "op" :: Parser Text
         case op of
             "source_for_hole" -> SourceForHole <$> v .: "holeId"
             "formal_for_section" -> FormalForSection <$> v .: "sectionId"
@@ -725,7 +726,7 @@ instance ToJSON SessionOp where
 
 instance FromJSON SessionOp where
     parseJSON = JSON.withObject "SessionOp" $ \v -> do
-        cat <- v .: "category" :: JSON.Parser Text
+        cat <- v .: "category" :: Parser Text
         case cat of
             "source" -> OpSource <$> v .: "operation"
             "target" -> OpTarget <$> v .: "operation"

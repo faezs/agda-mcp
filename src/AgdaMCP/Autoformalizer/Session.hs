@@ -227,7 +227,7 @@ runSession state action = do
 executeOp :: MonadIO m
           => SessionState
           -> SessionOp
-          -> (SessionOp -> m OpResult)
+          -> (SessionOp -> IO OpResult)
           -> m (Either SessionError OpResult)
 executeOp state op handler = liftIO $ do
     -- Check if session is finalized

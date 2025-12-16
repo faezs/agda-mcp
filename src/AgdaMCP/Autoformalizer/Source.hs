@@ -319,7 +319,7 @@ buildLatexSections content commands =
         let endPos = case filter (\(i, _) -> i > idx) indexed of
                          [] -> contentLen
                          ((_, (p, _, _)):_) -> p
-            secId = SectionId $ T.pack $ show idx <> "." <> T.take 20 (T.filter (/= ' ') title)
+            secId = SectionId $ T.pack (show idx) <> "." <> T.take 20 (T.filter (/= ' ') title)
             secContent = T.take (endPos - pos) (T.drop pos content)
         in Section
             { sectionId = secId
