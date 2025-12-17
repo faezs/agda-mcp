@@ -9,6 +9,13 @@ author: Claude Code
 maintainer: claude-code@anthropic.com
 category: Development
 build-type: Simple
+extra-source-files:
+  test/*.agda
+  test/edit-persistence/*.agda
+data-dir: test
+data-files:
+  *.agda
+  edit-persistence/*.agda
 
 library
   exposed-modules:
@@ -69,6 +76,9 @@ test-suite agda-mcp-tests
     AgdaMCP.MultiAgentSpec
     AgdaMCP.EditPersistenceSpec
     AgdaMCP.TestUtils
+    Paths_agda_mcp
+  autogen-modules:
+    Paths_agda_mcp
   build-depends:
     base >= 4.14 && < 5,
     agda-mcp,

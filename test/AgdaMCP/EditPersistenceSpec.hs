@@ -14,9 +14,10 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import System.FilePath ((</>), takeDirectory, takeFileName)
-import System.Directory (getCurrentDirectory, copyFile, createDirectoryIfMissing, removeFile, removeDirectoryRecursive, getTemporaryDirectory)
+import System.Directory (copyFile, createDirectoryIfMissing, removeFile, removeDirectoryRecursive, getTemporaryDirectory)
 import System.Random (randomIO)
 import Control.Exception (try, SomeException, bracket, catch)
+import Paths_agda_mcp (getDataDir)
 
 import AgdaMCP.Server
 import qualified AgdaMCP.Types as Types
@@ -70,10 +71,10 @@ assertNotContains needle haystack =
 -- | Custom version for edit-persistence subdirectory
 copyEditTestFile :: FilePath -> IO FilePath
 copyEditTestFile filename = do
-  cwd <- getCurrentDirectory
+  dataDir <- getDataDir
   tmpDir <- getTemporaryDirectory
   randomHash <- randomIO :: IO Int
-  let sourceFile = cwd </> "test" </> "edit-persistence" </> filename
+  let sourceFile = dataDir </> "edit-persistence" </> filename
   let tempDir = tmpDir </> ("agda-mcp-persist-test-" ++ show (abs randomHash))
   let tempFile = tempDir </> filename
   createDirectoryIfMissing True tempDir
