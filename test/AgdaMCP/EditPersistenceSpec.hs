@@ -21,7 +21,7 @@ import Control.Exception (try, SomeException, bracket, catch)
 import AgdaMCP.Server
 import qualified AgdaMCP.Types as Types
 import qualified AgdaMCP.SessionManager as SessionManager
-import MCP.Types (Content(..), TextContent(..))
+import MCP.Types (Content, ContentBlock(..), TextContent(..))
 import AgdaMCP.TestUtils (withTempTestFile)
 
 -- | Simple test case type
