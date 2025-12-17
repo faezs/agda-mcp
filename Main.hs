@@ -16,7 +16,7 @@ import Data.Text (Text)
 import System.IO (hSetEncoding, stderr, stdout, utf8, hPutStrLn)
 import System.IO.Unsafe (unsafePerformIO)
 
-import MCP.Protocol
+import MCP.Protocol hiding (error)
 import MCP.Server hiding (ServerState)
 import MCP.Server.HTTP
 import MCP.Types
