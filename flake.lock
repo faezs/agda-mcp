@@ -33,19 +33,19 @@
         "type": "github"
       }
     },
-    "mcp-server-hs": {
+    "mcp": {
       "flake": false,
       "locked": {
-        "lastModified": 1755071752,
-        "narHash": "sha256-DaSefoJKo6AJ9Gd8gwalVkkd5P7MVnstdeL6LV2izvY=",
-        "owner": "drshade",
-        "repo": "haskell-mcp-server",
-        "rev": "92c70a93446adca0c7cfced97a93eed23bfb5200",
+        "lastModified": 1753988023,
+        "narHash": "sha256-gTV52O4chiB8ehw/nNFvX5cYXACswrqE7aPA+5w/61g=",
+        "owner": "Tritlo",
+        "repo": "mcp",
+        "rev": "5ef0860698e0e2beecad7ea7d64bba53efca8034",
         "type": "github"
       },
       "original": {
-        "owner": "drshade",
-        "repo": "haskell-mcp-server",
+        "owner": "Tritlo",
+        "repo": "mcp",
         "type": "github"
       }
     },
@@ -84,7 +84,7 @@
       "inputs": {
         "flake-parts": "flake-parts",
         "haskell-flake": "haskell-flake",
-        "mcp-server-hs": "mcp-server-hs",
+        "mcp": "mcp",
         "nixpkgs": "nixpkgs"
       }
     }
