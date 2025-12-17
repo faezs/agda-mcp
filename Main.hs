@@ -11,12 +11,13 @@ import Data.Aeson (Value, toJSON)
 import qualified Data.Aeson as JSON
 import Data.IORef
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import System.IO (hSetEncoding, stderr, stdout, utf8, hPutStrLn)
 import System.IO.Unsafe (unsafePerformIO)
 
 import MCP.Protocol
-import MCP.Server
+import MCP.Server hiding (ServerState)
 import MCP.Server.HTTP
 import MCP.Types
 
@@ -54,7 +55,7 @@ instance MCPServer MCPServerM where
         result <- liftIO $ do
             -- Get session manager from global state
             manager <- getGlobalSessionManager
-            let args = maybe Map.empty id mArgs
+            let args = fromMaybe Map.empty mArgs
             callAgdaTool manager toolName args
         return result
 
