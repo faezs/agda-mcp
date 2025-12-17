@@ -26,15 +26,12 @@
           # (defined by `defaults.packages` option).
           #
           packages = {
-            mcp.source = pkgs.applyPatches {
-              name = "mcp-patched";
-              src = inputs.mcp;
-              patches = [ ./patches/mcp-relax-bounds.patch ];
-            };
+            mcp.source = inputs.mcp;
             # aeson.source = "1.5.0.0";      # Override aeson to a custom version from Hackage
             # shower.source = inputs.shower; # Override shower to a custom source path
           };
           settings = {
+            mcp.jailbreak = true;
             #  aeson = {
             #    check = false;
             #  };
