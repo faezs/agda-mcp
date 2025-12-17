@@ -76,6 +76,7 @@ test-suite agda-mcp-tests
     AgdaMCP.EditPersistenceSpec
     AgdaMCP.TestUtils
     AgdaMCP.Autoformalizer.ProtocolSpec
+    AgdaMCP.Autoformalizer.MarcolliManinSpec
   build-depends:
     base >= 4.14 && < 5,
     agda-mcp,
