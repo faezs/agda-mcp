@@ -42,7 +42,7 @@ import System.FilePath (takeDirectory)
 import System.Directory (listDirectory)
 
 -- MCP Server library
-import MCP.Types (Content, TextContent(..), TextContentType(..), TextResourceContents(..), ResourceContents(..))
+import MCP.Types (Content, ContentBlock(..), TextContent(..), TextResourceContents(..), ResourceContents(..))
 import qualified AgdaMCP.Types
 import qualified AgdaMCP.Repl as Repl
 import qualified AgdaMCP.SessionManager as SessionManager
