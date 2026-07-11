@@ -25,7 +25,7 @@ import System.IO.Unsafe (unsafePerformIO)
 import AgdaMCP.Server
 import qualified AgdaMCP.Types as Types
 import qualified AgdaMCP.SessionManager as SessionManager
-import qualified MCP.Server as MCP
+import MCP.Types (Content, ContentBlock(..), TextContent(..))
 import AgdaMCP.TestUtils (withTempTestFile)
 
 -- | Simple test case type
@@ -65,11 +65,11 @@ runTool manager tool = do
   let toolWithFullFormat = setFormat tool (Just "Full")
   result <- handleAgdaToolWithSession manager toolWithFullFormat
   case result of
-    MCP.ContentText txt -> do
+    TextContentType (TextContent _ txt _ _) -> do
       case JSON.decode (LBS.fromStrict $ TE.encodeUtf8 txt) of
         Just val -> pure val
         Nothing -> fail $ "Failed to parse JSON response: " ++ T.unpack txt
-    _ -> fail "Expected ContentText response"
+    _ -> fail "Expected TextContent response"
 
 -- | Helper to run a tool and get the response as Text (forces Concise format)
 runToolConcise :: SessionManager.SessionManager ServerState -> Types.AgdaTool -> IO Text
@@ -78,8 +78,8 @@ runToolConcise manager tool = do
   let toolWithConciseFormat = setFormat tool (Just "Concise")
   result <- handleAgdaToolWithSession manager toolWithConciseFormat
   case result of
-    MCP.ContentText txt -> pure txt
-    _ -> fail "Expected ContentText response"
+    TextContentType (TextContent _ txt _ _) -> pure txt
+    _ -> fail "Expected TextContent response"
 
 -- | Set format on a tool (preserves sessionId) - simplified for GetGoals and other tools
 setFormat :: Types.AgdaTool -> Maybe Text -> Types.AgdaTool

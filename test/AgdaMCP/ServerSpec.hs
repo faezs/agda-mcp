@@ -24,7 +24,7 @@ import System.Timeout (timeout)
 import AgdaMCP.Server
 import qualified AgdaMCP.Types as Types
 import qualified AgdaMCP.SessionManager as SessionManager
-import qualified MCP.Server as MCP
+import MCP.Types (Content, ContentBlock(..), TextContent(..))
 import qualified AgdaMCP.MultiAgentSpec as MultiAgent
 import AgdaMCP.TestUtils (withTempTestFile)
 
@@ -65,11 +65,11 @@ runTool manager tool = do
   let toolWithFullFormat = setFormat tool (Just "Full")
   result <- handleAgdaToolWithSession manager toolWithFullFormat
   case result of
-    MCP.ContentText txt -> do
+    TextContentType (TextContent _ txt _ _) -> do
       case JSON.decode (LBS.fromStrict $ TE.encodeUtf8 txt) of
         Just val -> pure val
         Nothing -> fail $ "Failed to parse JSON response: " ++ T.unpack txt
-    _ -> fail "Expected ContentText response"
+    _ -> fail "Expected TextContent response"
 
 -- | Helper to run a tool and get concise text response
 runToolConcise :: SessionManager.SessionManager ServerState -> Types.AgdaTool -> IO Text
@@ -78,8 +78,8 @@ runToolConcise manager tool = do
   let toolWithConciseFormat = setFormat tool (Just "Concise")
   result <- handleAgdaToolWithSession manager toolWithConciseFormat
   case result of
-    MCP.ContentText txt -> pure txt
-    _ -> fail "Expected ContentText response"
+    TextContentType (TextContent _ txt _ _) -> pure txt
+    _ -> fail "Expected TextContent response"
 
 -- | Set format on a tool (preserves sessionId)
 setFormat :: Types.AgdaTool -> Maybe Text -> Types.AgdaTool
@@ -973,8 +973,8 @@ goalAtPositionTests = testGroup "agda_goal_at_position"
       result <- handleAgdaToolWithSession manager tool
 
       case result of
-        MCP.ContentText txt -> assertBool "Should mention no goal found" (T.isInfixOf "No goal found" txt)
-        _ -> assertFailure "Expected ContentText response"
+        TextContentType (TextContent _ txt _ _) -> assertBool "Should mention no goal found" (T.isInfixOf "No goal found" txt)
+        _ -> assertFailure "Expected TextContent response"
 
   , withSessionManager $ \getManager ->simpleTestCase "formats concisely" $ do
       manager <- getManager

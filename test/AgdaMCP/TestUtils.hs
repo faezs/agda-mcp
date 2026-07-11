@@ -8,9 +8,10 @@ module AgdaMCP.TestUtils
   ) where
 
 import System.FilePath ((</>), takeDirectory)
-import System.Directory (getCurrentDirectory, copyFile, createDirectoryIfMissing, removeDirectoryRecursive, getTemporaryDirectory)
+import System.Directory (copyFile, createDirectoryIfMissing, removeDirectoryRecursive, getTemporaryDirectory)
 import System.Random (randomIO)
 import Control.Exception (SomeException, bracket, catch)
+import Paths_agda_mcp (getDataDir)
 
 -- ============================================================================
 -- Temp File Utilities (for tests that modify files)
@@ -20,10 +21,10 @@ import Control.Exception (SomeException, bracket, catch)
 -- Uses random temp directory to preserve module name and avoid conflicts
 copyTestFile :: FilePath -> IO FilePath
 copyTestFile filename = do
-  cwd <- getCurrentDirectory
+  dataDir <- getDataDir
   tmpDir <- getTemporaryDirectory
   randomHash <- randomIO :: IO Int
-  let sourceFile = cwd </> "test" </> filename
+  let sourceFile = dataDir </> filename
   let tempDir = tmpDir </> ("agda-mcp-test-" ++ show (abs randomHash))
   let tempFile = tempDir </> filename
   createDirectoryIfMissing True tempDir

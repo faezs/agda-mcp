@@ -3,7 +3,7 @@
     nixpkgs.url = "github:nixos/nixpkgs/e643668fd71b949c53f8626614b21ff71a07379d";
     flake-parts.url = "github:hercules-ci/flake-parts";
     haskell-flake.url = "github:srid/haskell-flake";
-    mcp-server-hs = { url = "github:drshade/haskell-mcp-server"; flake = false; };
+    mcp = { url = "github:Tritlo/mcp"; flake = false; };
   };
   outputs = inputs@{ self, nixpkgs, flake-parts, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
@@ -26,15 +26,12 @@
           # (defined by `defaults.packages` option).
           #
           packages = {
-            mcp-server.source = pkgs.applyPatches {
-              name = "mcp-server-patched";
-              src = inputs.mcp-server-hs;
-              patches = [ ./patches/mcp-server-header-optional.patch ];
-            };
+            mcp.source = inputs.mcp;
             # aeson.source = "1.5.0.0";      # Override aeson to a custom version from Hackage
             # shower.source = inputs.shower; # Override shower to a custom source path
           };
           settings = {
+            mcp.jailbreak = true;
             #  aeson = {
             #    check = false;
             #  };
@@ -61,7 +58,7 @@
         };
 
         # haskell-flake doesn't set the default package, but you can do it here.
-        packages.default = self'.packages.example;
+        packages.default = self'.packages.agda-mcp;
       };
     };
 }

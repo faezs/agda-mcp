@@ -139,23 +139,25 @@ applyReplaceLine file lineNum clauses _indentLevel _needsReload = do
     then putStrLn $ "Warning: Line number " ++ show lineNum ++ " out of bounds"
     else do
       -- Split at line position
-      let (beforeLines, originalLine:afterLines) = splitAt (lineNum - 1) lines'
+      let (beforeLines, rest) = splitAt (lineNum - 1) lines'
+      case rest of
+        [] -> putStrLn $ "Warning: Line number " ++ show lineNum ++ " resulted in empty rest"
+        (originalLine:afterLines) -> do
+          -- Calculate indentation from the original line (leading whitespace)
+          let originalIndent = T.takeWhile (== ' ') originalLine
+          let indentLevel = T.length originalIndent
 
-      -- Calculate indentation from the original line (leading whitespace)
-      let originalIndent = T.takeWhile (== ' ') originalLine
-      let indentLevel = T.length originalIndent
+          -- Apply the same indentation to each clause
+          -- Note: Agda provides clauses without leading whitespace
+          let indentedClauses = map (originalIndent <>) clauses
 
-      -- Apply the same indentation to each clause
-      -- Note: Agda provides clauses without leading whitespace
-      let indentedClauses = map (originalIndent <>) clauses
+          -- Reconstruct file
+          let newContent = T.unlines $ beforeLines ++ indentedClauses ++ afterLines
+          TIO.writeFile file newContent
 
-      -- Reconstruct file
-      let newContent = T.unlines $ beforeLines ++ indentedClauses ++ afterLines
-      TIO.writeFile file newContent
-
-      putStrLn $ "Replaced line " ++ show lineNum ++ " with " ++
-                 show (length clauses) ++ " clauses (indent level: " ++
-                 show indentLevel ++ ")"
+          putStrLn $ "Replaced line " ++ show lineNum ++ " with " ++
+                     show (length clauses) ++ " clauses (indent level: " ++
+                     show indentLevel ++ ")"
 
 -- ============================================================================
 -- Strategy 3: BatchEdits (reverse-order application)
