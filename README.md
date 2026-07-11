@@ -1,6 +1,6 @@
 # Agda MCP Server
 
-A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that provides interactive Agda development capabilities to AI assistants like Claude Code. This enables AI-assisted proof development, interactive theorem proving, and exploration of Agda code through a standardized protocol.
+A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that provides interactive Agda development capabilities. This enables AI-assisted proof development, interactive theorem proving, and exploration of Agda code through a standardized protocol.
 
 ## Features
 
@@ -8,7 +8,6 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that p
 - **24 Interactive Commands**: Comprehensive coverage of Agda interaction operations including proof search, case splitting, and module exploration
 - **Automatic File Persistence**: Commands that modify code (give, refine, case split, auto) automatically persist changes to disk
 - **HTTP Transport**: Standards-compliant MCP server with HTTP/JSON-RPC transport
-- **Backward Compatibility Patch**: Includes patch for mcp-server to work with Claude Code's HTTP transport
 - **Type-Safe Integration**: Built with Haskell's type system for robust MCP protocol handling
 - **Smart Response Formatting**: Concise human-readable output by default (~90% size reduction), with optional full JSON mode
 
@@ -24,7 +23,7 @@ The server runs a persistent Agda REPL in a background thread, communicating via
 
 When commands modify Agda code, changes are automatically persisted to disk:
 - **Response capture**: The REPL callback intercepts typed `Response` values (e.g., `Resp_GiveAction`, `Resp_MakeCase`)
-- **Smart extraction**: Edit operations are extracted in the TCM monad context using Agda's native APIs
+- **Monadic**: Edit operations are in the TCM monad context using Agda's native APIs
 - **Type-specific strategies**: Different edit types for different operations:
   - `ReplaceHole`: In-place hole filling (give, refine, auto)
   - `ReplaceLine`: Structural edits with line insertion (case split)
