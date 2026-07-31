@@ -61,7 +61,7 @@
         };
 
         # haskell-flake doesn't set the default package, but you can do it here.
-        packages.default = self'.packages.example;
+        packages.default = self'.packages.agda-mcp;
       };
     };
 }
