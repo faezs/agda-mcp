@@ -10,6 +10,13 @@ maintainer: claude-code@anthropic.com
 category: Development
 build-type: Simple
 
+-- .agda files used by the test suite. Without this they are absent from
+-- the source distribution, so any build from an sdist (including
+-- `nix build`) fails 43 of 64 tests with "does not exist".
+extra-source-files:
+  test/*.agda
+  test/edit-persistence/*.agda
+
 library
   exposed-modules:
     AgdaMCP.Server
